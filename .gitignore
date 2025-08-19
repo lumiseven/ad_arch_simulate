@@ -1,0 +1,22 @@
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Compiled Python bytecode
+__pycache__/
+*.pyc
+
+# Editor/IDE specific files
+.vscode/
+.idea/
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+
+.coverage
+.kiro
+.pytest_cache
+uv.lock
