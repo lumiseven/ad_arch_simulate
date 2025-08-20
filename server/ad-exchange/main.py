@@ -1,6 +1,21 @@
 """
-Ad Exchange main application.
-FastAPI service for real-time bidding coordination between DSPs and SSPs.
+广告交易平台 (Ad Exchange) 主应用程序
+
+这是广告交易平台的核心服务，负责协调DSP和SSP之间的实时竞价(RTB)流程。
+主要功能包括：
+- 接收来自SSP的广告请求
+- 向多个DSP发送竞价请求
+- 评估和选择获胜的竞价
+- 执行完整的RTB工作流程演示
+- 记录交易数据和统计信息
+
+技术栈：
+- FastAPI: Web框架
+- asyncio: 异步处理
+- httpx: HTTP客户端
+- Pydantic: 数据验证
+
+端口: 8004
 """
 
 import asyncio
@@ -90,9 +105,29 @@ dmp_client = APIClient(config.get_service_url("dmp"))
 
 
 class AdExchangeEngine:
-    """Core auction engine for Ad Exchange."""
+    """
+    广告交易平台核心竞价引擎
+    
+    负责执行实时竞价(RTB)流程的核心引擎，包括：
+    - 管理竞价超时控制
+    - 协调多个DSP的并行竞价
+    - 执行竞价评估和排序算法
+    - 计算最终竞价价格
+    - 发送获胜通知
+    - 记录交易数据和统计信息
+    """
     
     def __init__(self):
+        """
+        初始化广告交易引擎
+        
+        设置关键参数：
+        - exchange_id: 交易平台唯一标识
+        - auction_timeout: 总竞价超时时间(100ms)
+        - dsp_timeout: 单个DSP响应超时时间(50ms)  
+        - platform_fee_rate: 平台费率(10%)
+        - second_price_auction: 是否使用第二价格竞价
+        """
         self.exchange_id = "adx-001"
         self.auction_timeout = 0.1  # 100ms total auction timeout
         self.dsp_timeout = 0.05     # 50ms per DSP timeout
@@ -100,7 +135,28 @@ class AdExchangeEngine:
         self.second_price_auction = True  # Use second-price auction
     
     async def conduct_auction(self, bid_request: BidRequest) -> AuctionResult:
-        """Conduct RTB auction for the given bid request."""
+        """
+        执行RTB竞价流程
+        
+        这是核心的竞价协调方法，执行完整的实时竞价流程：
+        1. 生成竞价ID并记录开始时间
+        2. 并行向所有DSP发送竞价请求
+        3. 收集和评估所有竞价响应
+        4. 选择获胜竞价并计算最终价格
+        5. 发送获胜通知给获胜DSP
+        6. 更新平台统计数据
+        7. 记录完整的竞价结果
+        
+        参数:
+            bid_request: 来自SSP的竞价请求，包含用户和广告位信息
+            
+        返回:
+            AuctionResult: 完整的竞价结果，包含获胜竞价和所有参与竞价
+            
+        异常处理:
+            - 如果竞价过程中出现错误，返回空的竞价结果
+            - 所有错误都会被记录到日志中
+        """
         auction_id = generate_id()
         start_time = datetime.now()
         
@@ -164,7 +220,26 @@ class AdExchangeEngine:
             )
     
     async def _collect_bids(self, bid_request: BidRequest) -> List[BidResponse]:
-        """Collect bids from all DSPs in parallel."""
+        """
+        并行收集所有DSP的竞价响应
+        
+        这个方法负责：
+        1. 为每个注册的DSP创建异步竞价任务
+        2. 使用asyncio.gather并行执行所有竞价请求
+        3. 设置严格的超时控制(50ms)
+        4. 过滤掉异常和无效的响应
+        5. 返回所有有效的竞价响应
+        
+        参数:
+            bid_request: 竞价请求对象
+            
+        返回:
+            List[BidResponse]: 所有有效的DSP竞价响应列表
+            
+        超时处理:
+            - 如果任何DSP超时，会记录警告但不影响其他DSP
+            - 超时的DSP不会参与最终的竞价评估
+        """
         bid_tasks = []
         
         # Create bid request tasks for each DSP
@@ -214,7 +289,31 @@ class AdExchangeEngine:
             return None
     
     def _evaluate_bids(self, bid_responses: List[BidResponse], bid_request: BidRequest) -> tuple[Optional[BidResponse], float]:
-        """Evaluate bids and determine winner and auction price."""
+        """
+        评估竞价并确定获胜者和最终价格
+        
+        竞价评估流程：
+        1. 过滤出满足底价要求的有效竞价
+        2. 按竞价价格降序排序
+        3. 选择最高价竞价作为获胜者
+        4. 根据竞价模式计算最终价格：
+           - 第二价格竞价：获胜者支付第二高价+0.01
+           - 第一价格竞价：获胜者支付自己的出价
+        5. 确保最终价格不超过获胜竞价
+        
+        参数:
+            bid_responses: 所有DSP的竞价响应
+            bid_request: 原始竞价请求(包含底价信息)
+            
+        返回:
+            tuple: (获胜竞价对象, 最终竞价价格)
+            - 如果没有有效竞价，返回(None, 0.0)
+            
+        竞价规则:
+            - 必须满足广告位底价要求
+            - 支持第一价格和第二价格竞价模式
+            - 价格精确到4位小数
+        """
         if not bid_responses:
             return None, 0.0
         

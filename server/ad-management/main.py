@@ -1,6 +1,22 @@
 """
-Ad Management Platform main application.
-FastAPI service for managing advertising campaigns.
+广告管理平台主应用程序
+
+这是广告管理平台的核心服务，为广告主提供广告活动管理功能。
+主要功能包括：
+- 创建和管理广告活动
+- 设置广告创意和定向条件
+- 管理广告预算和支出跟踪
+- 提供活动统计和报表
+- 验证定向条件和创意内容
+- 监控预算使用情况
+
+技术栈：
+- FastAPI: Web框架
+- SQLAlchemy: 数据库ORM
+- Pydantic: 数据验证
+- SQLite: 数据存储
+
+端口: 8001
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Request
@@ -139,7 +155,36 @@ class BudgetUpdate(BaseModel):
 
 
 def validate_targeting_criteria(targeting: Dict[str, Any]) -> bool:
-    """Validate targeting criteria structure and values."""
+    """
+    验证定向条件的结构和数值
+    
+    这个函数确保广告活动的定向条件符合系统要求：
+    
+    支持的定向条件：
+    - age_range: 年龄范围 {min_age: int, max_age: int}
+    - gender: 性别 (字符串)
+    - location: 地理位置 {countries: list, regions: list, cities: list}
+    - interests: 兴趣标签 (字符串列表)
+    - device_types: 设备类型 (字符串列表)
+    - languages: 语言 (字符串列表)
+    
+    验证逻辑：
+    1. 检查定向条件是否在允许列表中
+    2. 验证每个条件的数据类型
+    3. 对于复杂结构，递归验证子字段
+    4. 记录未知的定向条件但不拒绝
+    
+    参数:
+        targeting: 定向条件字典
+        
+    返回:
+        bool: True表示验证通过，False表示格式错误
+        
+    容错性:
+        - 空的定向条件被认为是有效的
+        - 未知的定向条件会记录警告但不影响验证结果
+        - 类型错误会导致验证失败
+    """
     if not targeting:
         return True
     
@@ -223,7 +268,38 @@ async def initialize_campaign_stats(campaign_id: str) -> CampaignStats:
 
 
 async def update_campaign_spend(campaign_id: str, amount: float) -> bool:
-    """Update campaign spend amount."""
+    """
+    更新广告活动支出金额
+    
+    这个函数处理广告活动的预算消耗更新：
+    1. 使用数据库服务更新支出金额
+    2. 验证支出不超过预算限制
+    3. 同步更新活动统计数据
+    4. 记录支出更新日志
+    5. 返回操作成功状态
+    
+    预算控制：
+    - 严格检查支出不能超过总预算
+    - 支持增量更新和绝对值更新
+    - 自动计算剩余预算
+    
+    参数:
+        campaign_id: 广告活动唯一标识符
+        amount: 要更新的支出金额
+        
+    返回:
+        bool: True表示更新成功，False表示更新失败
+        
+    失败原因:
+        - 活动不存在
+        - 支出超过预算限制
+        - 数据库操作失败
+        
+    副作用:
+        - 更新数据库中的活动支出
+        - 更新活动统计表中的支出数据
+        - 记录操作日志
+    """
     try:
         # Update spend using database service
         success = await campaign_service.update_spend(campaign_id, amount)
@@ -297,7 +373,39 @@ async def health_check():
 
 @app.post("/campaigns", response_model=Campaign)
 async def create_campaign(campaign_data: CampaignCreate):
-    """Create a new advertising campaign."""
+    """
+    创建新的广告活动
+    
+    这是广告管理平台的核心功能，为广告主创建新的广告活动：
+    1. 验证定向条件的格式和有效性
+    2. 验证创意内容的完整性
+    3. 生成唯一的活动ID
+    4. 创建活动对象并设置初始状态为草稿
+    5. 存储到数据库中
+    6. 初始化活动统计数据
+    7. 记录创建日志
+    
+    验证规则：
+    - 定向条件必须符合预定义格式
+    - 创意内容必须包含必要字段
+    - 预算必须为正数
+    - 广告主ID必须有效
+    
+    参数:
+        campaign_data: 活动创建数据，包含名称、预算、定向、创意等
+        
+    返回:
+        Campaign: 创建成功的广告活动对象
+        
+    异常:
+        - 400: 定向条件或创意内容格式无效
+        - 500: 数据库操作失败
+        
+    初始状态:
+        - 状态设置为DRAFT(草稿)
+        - 支出金额为0
+        - 自动生成创建和更新时间
+    """
     # Validate targeting criteria
     if not validate_targeting_criteria(campaign_data.targeting):
         raise HTTPException(

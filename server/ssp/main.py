@@ -1,6 +1,22 @@
 """
-Supply-Side Platform (SSP) main application.
-FastAPI service for managing ad inventory and publisher revenue.
+供应方平台 (SSP) 主应用程序
+
+这是供应方平台的核心服务，为媒体方管理广告位库存并优化收益。
+主要功能包括：
+- 处理来自媒体页面的广告请求
+- 管理广告位库存和可用性
+- 向Ad Exchange发送竞价请求
+- 选择最高出价的广告进行展示
+- 记录展示数据和收益统计
+- 生成媒体方收益报表
+
+技术栈：
+- FastAPI: Web框架
+- httpx: HTTP客户端
+- Pydantic: 数据验证
+- 内存存储: 演示用数据存储
+
+端口: 8003
 """
 
 import asyncio
@@ -245,8 +261,30 @@ async def health_check():
 @app.post("/ad-request", response_model=AdResponse)
 async def process_ad_request(request: AdRequest, background_tasks: BackgroundTasks):
     """
-    Process advertisement request from publisher.
-    Requirement 3.1: Handle ad requests from media pages.
+    处理来自媒体方的广告请求
+    
+    这是SSP的核心功能，处理媒体页面的广告展示请求：
+    1. 验证广告位是否存在且可用
+    2. 构建标准化的竞价请求
+    3. 发送请求到Ad Exchange进行竞价
+    4. 接收获胜广告并生成响应
+    5. 在后台更新库存统计数据
+    6. 记录展示数据用于收益计算
+    
+    参数:
+        request: 广告请求，包含用户ID、设备信息、地理位置等
+        background_tasks: 后台任务队列，用于异步更新统计
+        
+    返回:
+        AdResponse: 广告响应，包含获胜广告的创意内容和价格
+        
+    异常:
+        - 404: 广告位不存在
+        - 400: 广告位不可用
+        - 204: 没有可用广告
+        - 500: 内部服务错误
+        
+    需求映射: 需求3.1 - 处理来自媒体页面的广告请求
     """
     logger.info(f"Processing ad request for slot {request.slot_id}")
     
@@ -412,8 +450,31 @@ async def record_impression(impression_id: str, background_tasks: BackgroundTask
 
 async def send_to_ad_exchange(bid_request: BidRequest) -> Optional[BidResponse]:
     """
-    Send bid request to Ad Exchange and get winning ad.
-    Requirement 3.3: Implement revenue optimization by selecting highest bid.
+    向广告交易平台发送竞价请求并获取获胜广告
+    
+    这个函数实现SSP与Ad Exchange的通信：
+    1. 使用HTTP客户端发送竞价请求
+    2. 设置严格的超时控制(100ms)
+    3. 解析竞价结果并提取获胜广告
+    4. 处理各种网络和服务异常
+    5. 返回获胜的广告创意和价格信息
+    
+    参数:
+        bid_request: 标准化的竞价请求对象
+        
+    返回:
+        Optional[BidResponse]: 获胜的竞价响应，如果没有获胜者则返回None
+        
+    超时处理:
+        - 100ms超时确保用户体验
+        - 超时情况下返回None，不影响页面加载
+        
+    错误处理:
+        - 网络错误: 记录日志并返回None
+        - 服务错误: 记录状态码并返回None
+        - 解析错误: 记录异常并返回None
+        
+    需求映射: 需求3.3 - 通过选择最高出价实现收益优化
     """
     try:
         async with httpx.AsyncClient(timeout=0.1) as client:  # 100ms timeout

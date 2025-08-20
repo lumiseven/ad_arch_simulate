@@ -1,6 +1,26 @@
 """
-Shared data models for the ad system architecture.
-Contains Pydantic models used across all services.
+广告系统架构的共享数据模型
+
+包含所有服务使用的Pydantic数据模型，提供数据验证和序列化功能。
+这些模型定义了系统中各种实体的结构和验证规则：
+
+核心模型：
+- Campaign: 广告活动模型
+- UserProfile: 用户画像模型  
+- BidRequest/BidResponse: 竞价请求和响应模型
+- Impression: 广告展示记录模型
+- AuctionResult: 竞价结果模型
+- UserEvent: 用户行为事件模型
+- CampaignStats: 广告活动统计模型
+
+辅助模型：
+- AdSlot: 广告位信息模型
+- Device: 设备信息模型
+- Geo: 地理位置信息模型
+- ErrorResponse: 标准错误响应模型
+- HealthCheck: 健康检查响应模型
+
+所有模型都包含完整的数据验证逻辑和字段描述。
 """
 
 from datetime import datetime

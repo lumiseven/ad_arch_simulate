@@ -1,6 +1,29 @@
 """
-Shared utilities for the ad system architecture.
-Contains common functions and helpers used across services.
+广告系统架构的共享工具模块
+
+包含所有服务使用的通用函数和辅助工具，提供以下功能：
+
+核心工具：
+- generate_id(): 生成唯一标识符
+- setup_logging(): 配置日志系统
+- APIClient: 增强的HTTP客户端，支持重试和错误处理
+- ServiceConfig: 服务配置管理
+- ServiceRegistry: 服务注册和发现
+
+错误处理：
+- ServiceError: 服务通信错误基类
+- ServiceUnavailableError: 服务不可用错误
+- ServiceTimeoutError: 服务超时错误
+- CircuitBreaker: 熔断器模式实现
+
+辅助功能：
+- retry_async(): 异步重试装饰器
+- log_rtb_step(): RTB流程日志记录
+- validate_model_data(): 模型数据验证
+- create_error_response(): 标准错误响应创建
+- handle_service_error(): 服务错误处理
+
+所有工具都经过优化，支持异步操作和错误恢复。
 """
 
 import uuid

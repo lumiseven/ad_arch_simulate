@@ -1,8 +1,22 @@
 """
-Data Management Platform (DMP) Service
+数据管理平台 (DMP) 服务
 
-This service manages user profiles, behavior data collection, and user segmentation.
-It provides APIs for storing and querying user data to support targeted advertising.
+这是数据管理平台的核心服务，负责管理用户画像、行为数据收集和用户分群。
+主要功能包括：
+- 存储和查询用户画像数据
+- 收集和处理用户行为事件
+- 自动更新用户兴趣和行为标签
+- 管理用户分群和细分
+- 为DSP提供精准的用户定向数据
+- 支持数据清理和保留策略
+
+技术栈：
+- FastAPI: Web框架
+- Pydantic: 数据验证
+- 内存存储: 演示用数据存储
+- UUID: 唯一标识符生成
+
+端口: 8005
 """
 
 import logging
@@ -118,7 +132,36 @@ async def health_check():
 
 @app.get("/user/{user_id}/profile", response_model=UserProfile)
 async def get_user_profile(user_id: str):
-    """Get user profile by user ID."""
+    """
+    根据用户ID获取用户画像
+    
+    这是DMP的核心查询接口，为DSP提供用户定向数据：
+    1. 验证用户ID的有效性
+    2. 从内存存储中查找用户画像
+    3. 返回完整的用户画像信息
+    4. 记录查询日志用于分析
+    
+    用户画像包含：
+    - 人口统计学信息(年龄、性别、地域等)
+    - 兴趣标签列表
+    - 行为标签列表  
+    - 用户分群信息
+    - 最后更新时间
+    
+    参数:
+        user_id: 用户唯一标识符
+        
+    返回:
+        UserProfile: 完整的用户画像对象
+        
+    异常:
+        - 404: 用户画像不存在
+        
+    使用场景:
+        - DSP竞价决策时查询用户画像
+        - 广告定向匹配
+        - 用户行为分析
+    """
     logger.info(f"Retrieving profile for user: {user_id}")
     
     if user_id not in user_profiles:
@@ -179,7 +222,40 @@ async def update_user_profile(user_id: str, profile_data: Dict[str, Any]):
 
 @app.post("/user/{user_id}/events", response_model=Dict[str, str])
 async def record_user_event(user_id: str, event_data: Dict[str, Any]):
-    """Record user behavior event."""
+    """
+    记录用户行为事件
+    
+    这是DMP的数据收集接口，用于收集和处理用户行为数据：
+    1. 验证事件数据的完整性和格式
+    2. 创建标准化的用户事件对象
+    3. 存储事件到用户行为历史
+    4. 基于事件自动更新用户画像
+    5. 更新用户分群归属
+    6. 生成事件ID用于追踪
+    
+    支持的事件类型：
+    - click: 点击事件
+    - view: 浏览事件
+    - purchase: 购买事件
+    - signup: 注册事件
+    - page_visit: 页面访问
+    - search: 搜索事件
+    
+    参数:
+        user_id: 用户唯一标识符
+        event_data: 事件数据，必须包含event_type字段
+        
+    返回:
+        Dict: 包含处理状态和事件ID的响应
+        
+    异常:
+        - 400: 缺少必需字段或数据格式错误
+        
+    画像更新逻辑:
+        - 根据事件类型添加行为标签
+        - 根据事件数据提取兴趣标签
+        - 自动更新用户分群归属
+    """
     logger.info(f"Recording event for user: {user_id}, type: {event_data.get('event_type')}")
     
     try:
@@ -338,7 +414,34 @@ async def _update_profile_from_event(user_id: str, event: UserEvent):
     _update_segment_memberships(user_id, profile)
 
 def _update_segment_memberships(user_id: str, profile: UserProfile):
-    """Update user segment memberships based on profile."""
+    """
+    根据用户画像更新用户分群归属
+    
+    这是DMP的智能分群逻辑，基于用户画像自动分配用户到相关分群：
+    
+    分群规则：
+    1. 高价值用户(high_value): 有购买行为的用户
+    2. 频繁购买者(frequent_buyers): 有3次以上购买记录的用户
+    3. 移动用户(mobile_users): 主要使用移动设备的用户
+    4. 年轻成人(young_adults): 年龄在18-35岁之间的用户
+    5. 科技爱好者(tech_enthusiasts): 对科技产品感兴趣的用户
+    
+    参数:
+        user_id: 用户唯一标识符
+        profile: 用户画像对象
+        
+    分群逻辑:
+        - 基于行为标签判断用户价值
+        - 基于设备信息判断使用习惯
+        - 基于人口统计学信息判断年龄段
+        - 基于兴趣标签判断偏好类别
+        - 自动维护分群列表和用户画像的一致性
+        
+    副作用:
+        - 更新全局分群字典
+        - 更新用户画像的分群字段
+        - 确保数据一致性
+    """
     # High value users (have purchase behavior)
     if "buyer" in profile.behaviors:
         if user_id not in user_segments["high_value"]:

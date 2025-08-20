@@ -1,6 +1,21 @@
 """
-Demand-Side Platform (DSP) main application.
-FastAPI service for real-time bidding on behalf of advertisers.
+需求方平台 (DSP) 主应用程序
+
+这是需求方平台的核心服务，代表广告主参与实时竞价。
+主要功能包括：
+- 接收来自Ad Exchange的竞价请求
+- 基于用户画像和广告活动进行竞价决策
+- 管理广告活动预算和频次控制
+- 记录竞价历史和统计数据
+- 处理竞价成功通知
+
+技术栈：
+- FastAPI: Web框架
+- asyncio: 异步处理
+- Pydantic: 数据验证
+- 内存存储: 演示用数据存储
+
+端口: 8002
 """
 
 import asyncio
@@ -82,16 +97,55 @@ ad_mgmt_client = APIClient(config.get_service_url("ad-management"))
 
 
 class DSPBiddingEngine:
-    """Core bidding engine for DSP."""
+    """
+    DSP核心竞价引擎
+    
+    负责DSP的竞价决策逻辑，包括：
+    - 评估竞价请求的匹配度
+    - 查询用户画像进行精准定向
+    - 计算合理的竞价价格
+    - 管理预算和频次控制
+    - 记录竞价历史和统计
+    """
     
     def __init__(self):
+        """
+        初始化DSP竞价引擎
+        
+        设置关键参数：
+        - dsp_id: DSP唯一标识符
+        - min_bid/max_bid: 竞价价格范围限制
+        - default_frequency_cap: 默认频次上限(每用户每活动每天5次)
+        """
         self.dsp_id = "dsp-001"
         self.min_bid = 0.01
         self.max_bid = 10.0
         self.default_frequency_cap = 5  # Max impressions per user per campaign per day
     
     async def evaluate_bid_request(self, bid_request: BidRequest) -> Optional[BidResponse]:
-        """Evaluate bid request and return bid response if suitable."""
+        """
+        评估竞价请求并返回竞价响应
+        
+        这是DSP的核心竞价决策方法，执行以下流程：
+        1. 从DMP获取用户画像数据
+        2. 查找匹配的广告活动
+        3. 检查预算和频次限制
+        4. 计算合理的竞价价格
+        5. 生成竞价响应
+        
+        参数:
+            bid_request: 来自Ad Exchange的竞价请求
+            
+        返回:
+            Optional[BidResponse]: 竞价响应，如果不参与竞价则返回None
+            
+        决策因素:
+            - 用户画像匹配度
+            - 广告活动定向条件
+            - 剩余预算情况
+            - 频次控制限制
+            - 设备类型和地理位置
+        """
         try:
             # Get user profile from DMP
             user_profile = await self._get_user_profile(bid_request.user_id)
@@ -220,7 +274,35 @@ class DSPBiddingEngine:
         return True
     
     def _calculate_bid_price(self, campaign: Campaign, bid_request: BidRequest, user_profile: Optional[UserProfile]) -> float:
-        """Calculate bid price based on campaign and user data."""
+        """
+        基于广告活动和用户数据计算竞价价格
+        
+        竞价价格计算逻辑：
+        1. 设置基础竞价价格(0.5)
+        2. 根据广告位底价调整(至少高出10%)
+        3. 根据用户画像质量调整：
+           - 兴趣和分群越多，价格越高
+           - 每个兴趣/分群增加10%
+        4. 根据设备类型调整：
+           - 移动设备: +20%
+           - 桌面设备: 基准价格
+           - 平板设备: -10%
+        5. 确保价格在允许范围内(0.01-10.0)
+        6. 精确到4位小数
+        
+        参数:
+            campaign: 匹配的广告活动
+            bid_request: 竞价请求(包含设备和广告位信息)
+            user_profile: 用户画像(可能为空)
+            
+        返回:
+            float: 计算得出的竞价价格
+            
+        价格策略:
+            - 优质用户画像获得更高出价
+            - 移动流量获得溢价
+            - 严格遵守底价要求
+        """
         base_price = 0.5  # Base bid price
         
         # Adjust based on ad slot floor price

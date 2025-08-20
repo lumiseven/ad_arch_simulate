@@ -1,6 +1,30 @@
 """
-Database configuration and utilities for the ad system.
-Provides SQLAlchemy models and database session management.
+广告系统的数据库配置和工具模块
+
+提供SQLAlchemy数据库模型和会话管理功能，支持异步数据库操作。
+
+核心功能：
+- 数据库连接配置和会话管理
+- SQLAlchemy ORM模型定义
+- 异步数据库操作支持
+- 数据库健康检查
+- SQLite性能优化配置
+
+数据库模型：
+- CampaignDB: 广告活动数据表
+- UserProfileDB: 用户画像数据表
+- ImpressionDB: 广告展示记录表
+- UserEventDB: 用户行为事件表
+- CampaignStatsDB: 广告活动统计表
+- AuctionResultDB: 竞价结果记录表
+
+工具函数：
+- get_db(): 数据库会话依赖注入
+- init_database(): 初始化数据库表
+- check_database_health(): 数据库健康检查
+- safe_database_operation(): 安全数据库操作包装
+
+支持SQLite和PostgreSQL数据库，包含完整的索引优化。
 """
 
 import os
