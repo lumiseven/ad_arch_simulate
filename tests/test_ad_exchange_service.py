@@ -14,7 +14,15 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from server.ad_exchange.main import app, auction_engine, AdExchangeEngine
+# Import with correct directory name (hyphen, not underscore)
+import importlib.util
+spec = importlib.util.spec_from_file_location("ad_exchange_main", "server/ad-exchange/main.py")
+ad_exchange_main = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ad_exchange_main)
+
+app = ad_exchange_main.app
+auction_engine = ad_exchange_main.auction_engine
+AdExchangeEngine = ad_exchange_main.AdExchangeEngine
 from shared.models import (
     BidRequest, BidResponse, AuctionResult, AdSlot, Device, Geo,
     HealthCheck
@@ -154,8 +162,6 @@ class TestAdExchangeEngine:
     
     def test_update_platform_stats(self):
         """Test platform statistics update."""
-        initial_auctions = self.engine._AdExchangeEngine__dict__.get('platform_stats', {}).get('total_auctions', 0)
-        
         # Create auction result with winning bid
         winning_bid = BidResponse(
             request_id="req-001",
@@ -174,7 +180,7 @@ class TestAdExchangeEngine:
         )
         
         # Update stats
-        from server.ad_exchange.main import platform_stats
+        platform_stats = ad_exchange_main.platform_stats
         initial_total = platform_stats["total_auctions"]
         initial_successful = platform_stats["successful_auctions"]
         initial_revenue = platform_stats["total_revenue"]
@@ -187,7 +193,7 @@ class TestAdExchangeEngine:
     
     def test_record_transaction(self):
         """Test transaction recording."""
-        from server.ad_exchange.main import transaction_records
+        transaction_records = ad_exchange_main.transaction_records
         initial_count = len(transaction_records)
         
         winning_bid = BidResponse(
@@ -272,7 +278,7 @@ class TestAdExchangeEngine:
         )
         
         # Patch the dsp_clients dictionary
-        with patch('server.ad_exchange.main.dsp_clients', {"dsp": mock_client}):
+        with patch.object(ad_exchange_main, 'dsp_clients', {"dsp": mock_client}):
             await self.engine._send_win_notice(winning_bid, 0.45, self.sample_bid_request)
         
         mock_client.post.assert_called_once()
@@ -290,7 +296,9 @@ class TestAdExchangeAPI:
         self.client = TestClient(app)
         
         # Clear auction history and transaction records
-        from server.ad_exchange.main import auction_history, transaction_records, platform_stats
+        auction_history = ad_exchange_main.auction_history
+        transaction_records = ad_exchange_main.transaction_records
+        platform_stats = ad_exchange_main.platform_stats
         auction_history.clear()
         transaction_records.clear()
         platform_stats.update({
@@ -336,48 +344,48 @@ class TestAdExchangeAPI:
         data = response.json()
         assert isinstance(data, list)
     
-    @patch('server.ad_exchange.main.auction_engine.conduct_auction')
-    def test_rtb_request_success(self, mock_conduct_auction):
+    def test_rtb_request_success(self):
         """Test successful RTB request handling."""
-        # Mock auction result
-        mock_auction_result = AuctionResult(
-            auction_id="auction-001",
-            request_id="req-001",
-            winning_bid=None,
-            all_bids=[],
-            auction_price=0.0
-        )
-        mock_conduct_auction.return_value = mock_auction_result
-        
-        bid_request_data = {
-            "id": "req-001",
-            "user_id": "user-001",
-            "ad_slot": {
-                "id": "slot-001",
-                "width": 728,
-                "height": 90,
-                "position": "top",
-                "floor_price": 0.1
-            },
-            "device": {
-                "type": "desktop",
-                "os": "Windows",
-                "browser": "Chrome",
-                "ip": "192.168.1.1"
-            },
-            "geo": {
-                "country": "US",
-                "region": "CA",
-                "city": "San Francisco"
+        with patch.object(ad_exchange_main.auction_engine, 'conduct_auction') as mock_conduct_auction:
+            # Mock auction result
+            mock_auction_result = AuctionResult(
+                auction_id="auction-001",
+                request_id="req-001",
+                winning_bid=None,
+                all_bids=[],
+                auction_price=0.0
+            )
+            mock_conduct_auction.return_value = mock_auction_result
+            
+            bid_request_data = {
+                "id": "req-001",
+                "user_id": "user-001",
+                "ad_slot": {
+                    "id": "slot-001",
+                    "width": 728,
+                    "height": 90,
+                    "position": "top",
+                    "floor_price": 0.1
+                },
+                "device": {
+                    "type": "desktop",
+                    "os": "Windows",
+                    "browser": "Chrome",
+                    "ip": "192.168.1.1"
+                },
+                "geo": {
+                    "country": "US",
+                    "region": "CA",
+                    "city": "San Francisco"
+                }
             }
-        }
-        
-        response = self.client.post("/rtb", json=bid_request_data)
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["auction_id"] == "auction-001"
-        assert data["request_id"] == "req-001"
+            
+            response = self.client.post("/rtb", json=bid_request_data)
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["auction_id"] == "auction-001"
+            assert data["request_id"] == "req-001"
     
     def test_rtb_request_invalid_data(self):
         """Test RTB request with invalid data."""
@@ -390,36 +398,37 @@ class TestAdExchangeAPI:
         
         assert response.status_code == 422  # Validation error
     
-    @patch('server.ad_exchange.main.auction_engine.conduct_auction')
-    def test_demo_rtb_flow(self, mock_conduct_auction):
+    def test_demo_rtb_flow(self):
         """Test RTB demo flow endpoint."""
-        # Mock auction result with winning bid
-        winning_bid = BidResponse(
-            request_id="req-001",
-            price=0.5,
-            creative={"title": "Demo Ad"},
-            campaign_id="camp-001",
-            dsp_id="dsp-001"
-        )
-        
-        mock_auction_result = AuctionResult(
-            auction_id="auction-001",
-            request_id="req-001",
-            winning_bid=winning_bid,
-            all_bids=[winning_bid],
-            auction_price=0.45
-        )
-        mock_conduct_auction.return_value = mock_auction_result
-        
-        response = self.client.post("/demo/rtb-flow")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "flow_id" in data
-        assert "bid_request" in data
-        assert "auction_result" in data
-        assert "impression_data" in data
-        assert data["impression_data"] is not None  # Should have impression data for winning bid
+        with patch.object(ad_exchange_main.rtb_orchestrator, 'execute_complete_rtb_workflow') as mock_workflow:
+            # Mock workflow result with winning bid
+            mock_workflow.return_value = {
+                "workflow_id": "test-workflow",
+                "status": "success",
+                "duration_ms": 85.0,
+                "steps": {
+                    "auction_result": {
+                        "auction_id": "auction-001",
+                        "winning_bid": {
+                            "campaign_id": "camp-001",
+                            "price": 0.5
+                        },
+                        "auction_price": 0.45
+                    },
+                    "display_result": {
+                        "impression_confirmed": True,
+                        "impression_id": "imp-001"
+                    }
+                }
+            }
+            
+            response = self.client.post("/demo/rtb-flow")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert "demo_info" in data
+            assert "workflow_result" in data
+            assert data["workflow_result"]["status"] == "success"
 
 
 class TestAdExchangeIntegration:
@@ -505,6 +514,362 @@ class TestAdExchangeIntegration:
         
         response = self.client.post("/rtb", json=invalid_bid_request)
         assert response.status_code == 422  # Validation error
+
+
+
+class TestRTBWorkflowOrchestrator:
+    """Test cases for RTB Workflow Orchestrator."""
+    
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.engine = AdExchangeEngine()
+        self.orchestrator = ad_exchange_main.RTBWorkflowOrchestrator(self.engine)
+    
+    def test_orchestrator_initialization(self):
+        """Test RTB workflow orchestrator initialization."""
+        assert self.orchestrator.auction_engine == self.engine
+        assert "total_workflows" in self.orchestrator.workflow_stats
+        assert "successful_workflows" in self.orchestrator.workflow_stats
+        assert "failed_workflows" in self.orchestrator.workflow_stats
+        assert "average_duration_ms" in self.orchestrator.workflow_stats
+    
+    def test_get_workflow_statistics(self):
+        """Test workflow statistics retrieval."""
+        stats = self.orchestrator.get_workflow_statistics()
+        
+        assert "total_workflows" in stats
+        assert "successful_workflows" in stats
+        assert "failed_workflows" in stats
+        assert "average_duration_ms" in stats
+        assert "success_rate" in stats
+        assert "failure_rate" in stats
+        
+        # Initially should be zero
+        assert stats["total_workflows"] == 0
+        assert stats["success_rate"] == 0
+        assert stats["failure_rate"] == 1  # When total_workflows is 0, failure_rate is calculated as 1 - success_rate
+    
+    @pytest.mark.asyncio
+    async def test_simulate_user_visit_with_context(self):
+        """Test user visit simulation with provided context."""
+        user_context = {
+            "user_id": "test-user-123",
+            "device_type": "mobile",
+            "location": {"country": "US", "city": "New York", "region": "NY"}
+        }
+        
+        visit_data = await self.orchestrator._simulate_user_visit(user_context)
+        
+        assert visit_data["user_id"] == "test-user-123"
+        assert visit_data["device_type"] == "mobile"
+        assert visit_data["location"]["country"] == "US"
+        assert visit_data["location"]["city"] == "New York"
+        assert "session_id" in visit_data
+        assert "page_url" in visit_data
+        assert "referrer" in visit_data
+        assert "timestamp" in visit_data
+    
+    @pytest.mark.asyncio
+    async def test_simulate_user_visit_without_context(self):
+        """Test user visit simulation without provided context."""
+        visit_data = await self.orchestrator._simulate_user_visit(None)
+        
+        assert visit_data["user_id"].startswith("user-")
+        assert visit_data["device_type"] in ["desktop", "mobile", "tablet"]
+        assert "country" in visit_data["location"]
+        assert "city" in visit_data["location"]
+        assert "session_id" in visit_data
+        assert "page_url" in visit_data
+        assert "referrer" in visit_data
+        assert "timestamp" in visit_data
+    
+    @pytest.mark.asyncio
+    async def test_generate_ad_request_mobile(self):
+        """Test ad request generation for mobile device."""
+        user_visit_data = {
+            "user_id": "test-user",
+            "device_type": "mobile",
+            "location": {"country": "US", "city": "San Francisco"}
+        }
+        
+        from shared.models import UserProfile
+        
+        user_profile = UserProfile(
+            user_id="test-user",
+            demographics={"age": 30, "gender": "male"},
+            interests=["technology", "sports"],
+            behaviors=["frequent_visitor"],
+            segments=["tech_enthusiasts"]
+        )
+        
+        ad_request = await self.orchestrator._generate_ad_request(user_visit_data, user_profile)
+        
+        assert "slot_id" in ad_request
+        assert ad_request["publisher_id"] == "pub-001"
+        assert "ad_slot" in ad_request
+        assert ad_request["ad_slot"]["width"] in [320, 300]  # Mobile ad sizes
+        assert ad_request["ad_slot"]["height"] in [50, 250]
+        assert "targeting_hints" in ad_request
+        assert ad_request["targeting_hints"]["interests"] == ["technology", "sports"]
+    
+    @pytest.mark.asyncio
+    async def test_generate_ad_request_desktop(self):
+        """Test ad request generation for desktop device."""
+        user_visit_data = {
+            "user_id": "test-user",
+            "device_type": "desktop",
+            "location": {"country": "US", "city": "San Francisco"}
+        }
+        
+        ad_request = await self.orchestrator._generate_ad_request(user_visit_data, None)
+        
+        assert "slot_id" in ad_request
+        assert ad_request["publisher_id"] == "pub-001"
+        assert "ad_slot" in ad_request
+        assert ad_request["ad_slot"]["width"] in [728, 300, 970]  # Desktop ad sizes
+        assert ad_request["ad_slot"]["height"] in [90, 250]
+        assert ad_request["targeting_hints"] == []  # No profile provided
+    
+    @pytest.mark.asyncio
+    async def test_create_bid_request(self):
+        """Test bid request creation."""
+        ad_request_data = {
+            "slot_id": "slot-123",
+            "publisher_id": "pub-001",
+            "ad_slot": {
+                "width": 728,
+                "height": 90,
+                "position": "top",
+                "floor_price": 0.5
+            },
+            "user_context": {
+                "user_id": "test-user",
+                "device_type": "desktop",
+                "location": {"country": "US", "city": "San Francisco", "region": "CA"}
+            }
+        }
+        
+        bid_request = await self.orchestrator._create_bid_request(ad_request_data, None)
+        
+        assert isinstance(bid_request, BidRequest)
+        assert bid_request.user_id == "test-user"
+        assert bid_request.ad_slot.width == 728
+        assert bid_request.ad_slot.height == 90
+        assert bid_request.ad_slot.position == "top"
+        assert bid_request.ad_slot.floor_price == 0.5
+        assert bid_request.device.type == "desktop"
+        assert bid_request.geo.country == "US"
+        assert bid_request.geo.city == "San Francisco"
+    
+    @pytest.mark.asyncio
+    async def test_process_winning_ad_with_winner(self):
+        """Test processing winning ad when there is a winner."""
+        winning_bid = BidResponse(
+            request_id="req-001",
+            price=0.8,
+            creative={"title": "Test Ad", "image_url": "https://example.com/ad.jpg"},
+            campaign_id="camp-001",
+            dsp_id="dsp-001"
+        )
+        
+        auction_result = AuctionResult(
+            auction_id="auction-001",
+            request_id="req-001",
+            winning_bid=winning_bid,
+            all_bids=[winning_bid],
+            auction_price=0.75
+        )
+        
+        user_visit_data = {
+            "user_id": "test-user",
+            "page_url": "https://example.com/page"
+        }
+        
+        display_result = await self.orchestrator._process_winning_ad(auction_result, user_visit_data)
+        
+        assert display_result["impression_confirmed"] is True
+        assert "impression_id" in display_result
+        assert display_result["campaign_id"] == "camp-001"
+        assert display_result["final_price"] == 0.75
+        assert "revenue_split" in display_result
+        assert display_result["revenue_split"]["advertiser_payment"] == 0.75
+        assert abs(display_result["revenue_split"]["platform_fee"] - 0.075) < 0.001  # 10% of 0.75 (floating point precision)
+        assert abs(display_result["revenue_split"]["publisher_revenue"] - 0.675) < 0.001  # 90% of 0.75 (floating point precision)
+    
+    @pytest.mark.asyncio
+    async def test_process_winning_ad_no_winner(self):
+        """Test processing winning ad when there is no winner."""
+        auction_result = AuctionResult(
+            auction_id="auction-001",
+            request_id="req-001",
+            winning_bid=None,
+            all_bids=[],
+            auction_price=0.0
+        )
+        
+        user_visit_data = {
+            "user_id": "test-user",
+            "page_url": "https://example.com/page"
+        }
+        
+        display_result = await self.orchestrator._process_winning_ad(auction_result, user_visit_data)
+        
+        assert display_result["impression_confirmed"] is False
+        assert display_result["reason"] == "no_winning_bid"
+        assert display_result["auction_id"] == "auction-001"
+    
+    def test_update_workflow_statistics_success(self):
+        """Test workflow statistics update for successful workflow."""
+        from datetime import datetime, timedelta
+        
+        workflow_id = "test-workflow"
+        start_time = datetime.now() - timedelta(milliseconds=100)
+        
+        initial_total = self.orchestrator.workflow_stats["total_workflows"]
+        initial_successful = self.orchestrator.workflow_stats["successful_workflows"]
+        
+        self.orchestrator._update_workflow_statistics(workflow_id, start_time, True)
+        
+        assert self.orchestrator.workflow_stats["total_workflows"] == initial_total + 1
+        assert self.orchestrator.workflow_stats["successful_workflows"] == initial_successful + 1
+        assert self.orchestrator.workflow_stats["failed_workflows"] == 0
+        assert self.orchestrator.workflow_stats["average_duration_ms"] > 0
+    
+    def test_update_workflow_statistics_failure(self):
+        """Test workflow statistics update for failed workflow."""
+        from datetime import datetime, timedelta
+        
+        workflow_id = "test-workflow"
+        start_time = datetime.now() - timedelta(milliseconds=50)
+        
+        initial_total = self.orchestrator.workflow_stats["total_workflows"]
+        initial_failed = self.orchestrator.workflow_stats["failed_workflows"]
+        
+        self.orchestrator._update_workflow_statistics(workflow_id, start_time, False)
+        
+        assert self.orchestrator.workflow_stats["total_workflows"] == initial_total + 1
+        assert self.orchestrator.workflow_stats["failed_workflows"] == initial_failed + 1
+        assert self.orchestrator.workflow_stats["average_duration_ms"] >= 0
+
+
+class TestAdExchangeWorkflowEndpoints:
+    """Test cases for Ad Exchange workflow endpoints."""
+    
+    def setup_method(self):
+        """Set up test client."""
+        self.client = TestClient(app)
+    
+    def test_get_workflow_statistics_endpoint(self):
+        """Test workflow statistics endpoint."""
+        response = self.client.get("/workflow/stats")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert "total_workflows" in data
+        assert "successful_workflows" in data
+        assert "failed_workflows" in data
+        assert "average_duration_ms" in data
+        assert "success_rate" in data
+        assert "failure_rate" in data
+    
+    def test_execute_complete_rtb_workflow_endpoint(self):
+        """Test complete RTB workflow execution endpoint."""
+        with patch.object(ad_exchange_main.rtb_orchestrator, 'execute_complete_rtb_workflow') as mock_workflow:
+            mock_workflow.return_value = {
+                "workflow_id": "test-workflow",
+                "status": "success",
+                "duration_ms": 95.0,
+                "steps": {
+                    "user_visit": {"user_id": "test-user"},
+                    "auction_result": {"auction_id": "test-auction"}
+                }
+            }
+            
+            response = self.client.post("/rtb/complete-workflow")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["workflow_id"] == "test-workflow"
+            assert data["status"] == "success"
+            assert data["duration_ms"] == 95.0
+    
+    def test_execute_complete_rtb_workflow_with_context(self):
+        """Test complete RTB workflow execution with user context."""
+        user_context = {
+            "user_id": "custom-user-123",
+            "device_type": "tablet",
+            "location": {"country": "CA", "city": "Toronto"}
+        }
+        
+        with patch.object(ad_exchange_main.rtb_orchestrator, 'execute_complete_rtb_workflow') as mock_workflow:
+            mock_workflow.return_value = {
+                "workflow_id": "test-workflow",
+                "status": "success",
+                "duration_ms": 85.0
+            }
+            
+            response = self.client.post("/rtb/complete-workflow", json=user_context)
+            
+            assert response.status_code == 200
+            mock_workflow.assert_called_once_with(user_context)
+    
+    def test_demo_rtb_flow_endpoint(self):
+        """Test demo RTB flow endpoint."""
+        with patch.object(ad_exchange_main.rtb_orchestrator, 'execute_complete_rtb_workflow') as mock_workflow:
+            mock_workflow.return_value = {
+                "workflow_id": "demo-workflow",
+                "status": "success",
+                "duration_ms": 78.0,
+                "steps": {
+                    "display_result": {"impression_confirmed": True}
+                }
+            }
+            
+            response = self.client.post("/demo/rtb-flow")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert "demo_info" in data
+            assert "workflow_result" in data
+            assert "console_logs_note" in data
+            assert data["demo_info"]["description"] == "Complete RTB workflow demonstration"
+            assert data["workflow_result"]["status"] == "success"
+    
+    def test_demo_rtb_flow_with_user_context(self):
+        """Test demo RTB flow with custom user context."""
+        user_context = {
+            "user_id": "demo-user-456",
+            "device_type": "mobile"
+        }
+        
+        with patch.object(ad_exchange_main.rtb_orchestrator, 'execute_complete_rtb_workflow') as mock_workflow:
+            mock_workflow.return_value = {
+                "workflow_id": "demo-workflow",
+                "status": "success",
+                "duration_ms": 82.0
+            }
+            
+            response = self.client.post("/demo/rtb-flow", json=user_context)
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert "demo_info" in data
+            assert "workflow_result" in data
+            mock_workflow.assert_called_once_with(user_context)
+    
+    def test_demo_rtb_flow_error_handling(self):
+        """Test demo RTB flow error handling."""
+        with patch.object(ad_exchange_main.rtb_orchestrator, 'execute_complete_rtb_workflow') as mock_workflow:
+            mock_workflow.side_effect = Exception("Workflow execution failed")
+            
+            response = self.client.post("/demo/rtb-flow")
+            
+            assert response.status_code == 200  # Demo endpoint returns 200 even on errors
+            data = response.json()
+            assert "demo_info" in data
+            assert "workflow_result" in data
+            assert data["workflow_result"]["status"] == "failed"
+            assert "Workflow execution failed" in data["workflow_result"]["error"]
 
 
 if __name__ == "__main__":

@@ -511,7 +511,21 @@ def create_error_response(error_code: str, message: str, details: Optional[Dict[
         message=message,
         details=details or {}
     )
-    return serialize_model(error)
+    # Convert to dict and ensure datetime objects are serialized
+    error_dict = serialize_model(error)
+    
+    # Convert any datetime objects to ISO strings
+    def convert_datetime(obj):
+        if isinstance(obj, dict):
+            return {k: convert_datetime(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_datetime(item) for item in obj]
+        elif hasattr(obj, 'isoformat'):  # datetime objects
+            return obj.isoformat()
+        else:
+            return obj
+    
+    return convert_datetime(error_dict)
 
 
 def handle_service_error(e: Exception, logger: logging.Logger, context: str = "") -> Dict[str, Any]:

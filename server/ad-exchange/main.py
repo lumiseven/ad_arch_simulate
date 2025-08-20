@@ -317,99 +317,6 @@ class AdExchangeEngine:
 auction_engine = AdExchangeEngine()
 
 
-@app.post("/rtb", response_model=AuctionResult)
-async def handle_rtb_request(bid_request: BidRequest):
-    """Handle real-time bidding request from SSP."""
-    try:
-        log_rtb_step(logger, "RTB Request Received", {
-            "request_id": bid_request.id,
-            "user_id": bid_request.user_id,
-            "ad_slot": f"{bid_request.ad_slot.width}x{bid_request.ad_slot.height}",
-            "device_type": bid_request.device.type,
-            "geo": f"{bid_request.geo.city}, {bid_request.geo.country}"
-        })
-        
-        # Conduct auction
-        auction_result = await auction_engine.conduct_auction(bid_request)
-        
-        return auction_result
-        
-    except Exception as e:
-        logger.error(f"Error handling RTB request: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.get("/auction/{auction_id}", response_model=AuctionResult)
-async def get_auction_details(auction_id: str):
-    """Get details of a specific auction."""
-    if auction_id not in auction_history:
-        raise HTTPException(status_code=404, detail="Auction not found")
-    
-    return auction_history[auction_id]
-
-
-@app.get("/stats", response_model=Dict[str, Any])
-async def get_platform_stats():
-    """Get Ad Exchange platform statistics."""
-    recent_auctions = list(auction_history.values())[-100:]  # Last 100 auctions
-    
-    if recent_auctions:
-        all_bids = []
-        for auction in recent_auctions:
-            all_bids.extend(auction.all_bids)
-        
-        auction_metrics = calculate_auction_metrics([bid.model_dump() for bid in all_bids])
-    else:
-        auction_metrics = {}
-    
-    stats = {
-        **platform_stats,
-        "recent_auction_metrics": auction_metrics,
-        "success_rate": (
-            platform_stats["successful_auctions"] / platform_stats["total_auctions"]
-            if platform_stats["total_auctions"] > 0 else 0
-        ),
-        "total_transactions": len(transaction_records)
-    }
-    
-    return stats
-
-
-@app.get("/transactions", response_model=List[Dict[str, Any]])
-async def get_transactions(limit: int = 100):
-    """Get recent transaction records."""
-    return transaction_records[-limit:]
-
-
-@app.get("/health", response_model=HealthCheck)
-async def health_check():
-    """Health check endpoint for Ad Exchange service."""
-    try:
-        # Check service health
-        health_details = {
-            "service": "ad-exchange",
-            "exchange_id": auction_engine.exchange_id,
-            "total_auctions": platform_stats["total_auctions"],
-            "successful_auctions": platform_stats["successful_auctions"],
-            "total_transactions": len(transaction_records),
-            "dsp_clients_configured": len(dsp_clients),
-            "workflow_stats": rtb_orchestrator.workflow_stats,
-            "uptime_check": "operational",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        return create_health_response("healthy", health_details)
-        
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        error_details = {
-            "service": "ad-exchange",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
-        return create_health_response("unhealthy", error_details)
-
-
 class RTBWorkflowOrchestrator:
     """Complete RTB workflow orchestration engine."""
     
@@ -449,7 +356,7 @@ class RTBWorkflowOrchestrator:
             bid_request = await self._create_bid_request(ad_request_data, user_profile)
             
             # Step 5: Conduct parallel DSP auction with timeout control
-            auction_result = await self._conduct_parallel_auction(bid_request, user_profile)
+            auction_result = await self.auction_engine.conduct_auction(bid_request)
             
             # Step 6: Process winning ad and confirm display
             display_result = await self._process_winning_ad(auction_result, user_visit_data)
@@ -460,7 +367,7 @@ class RTBWorkflowOrchestrator:
             )
             
             # Step 8: Update statistics
-            await self._update_workflow_statistics(workflow_id, start_time, True)
+            self._update_workflow_statistics(workflow_id, start_time, True)
             
             duration_ms = (datetime.now() - start_time).total_seconds() * 1000
             
@@ -489,7 +396,7 @@ class RTBWorkflowOrchestrator:
             }
             
         except Exception as e:
-            await self._update_workflow_statistics(workflow_id, start_time, False)
+            self._update_workflow_statistics(workflow_id, start_time, False)
             duration_ms = (datetime.now() - start_time).total_seconds() * 1000
             
             log_rtb_step(logger, "RTB Workflow Failed", {
@@ -676,315 +583,99 @@ class RTBWorkflowOrchestrator:
         
         return bid_request
     
-    async def _conduct_parallel_auction(self, bid_request: BidRequest, user_profile: Optional[UserProfile]) -> AuctionResult:
-        """Conduct parallel DSP auction with enhanced timeout control."""
-        auction_start = datetime.now()
-        
-        log_rtb_step(logger, "Parallel Auction Started", {
-            "request_id": bid_request.id,
-            "dsp_count": len(dsp_clients),
-            "timeout_ms": self.auction_engine.dsp_timeout * 1000
-        })
-        
-        # Enhanced parallel bid collection with individual DSP tracking
-        bid_tasks = []
-        dsp_tracking = {}
-        
-        for dsp_name, dsp_client in dsp_clients.items():
-            dsp_start_time = datetime.now()
-            dsp_tracking[dsp_name] = {"start_time": dsp_start_time, "status": "pending"}
-            
-            task = asyncio.create_task(
-                self._enhanced_dsp_bid_request(dsp_client, bid_request, dsp_name, user_profile)
-            )
-            bid_tasks.append((dsp_name, task))
-        
-        # Wait for all DSP responses with timeout
-        bid_responses = []
-        try:
-            # Use asyncio.wait instead of gather for better timeout control
-            done, pending = await asyncio.wait(
-                [task for _, task in bid_tasks],
-                timeout=self.auction_engine.dsp_timeout,
-                return_when=asyncio.ALL_COMPLETED
-            )
-            
-            # Process completed tasks
-            for dsp_name, task in bid_tasks:
-                if task in done:
-                    try:
-                        result = await task
-                        if result:
-                            bid_responses.append(result)
-                            dsp_tracking[dsp_name]["status"] = "success"
-                        else:
-                            dsp_tracking[dsp_name]["status"] = "no_bid"
-                    except Exception as e:
-                        dsp_tracking[dsp_name]["status"] = f"error: {str(e)}"
-                else:
-                    dsp_tracking[dsp_name]["status"] = "timeout"
-                    task.cancel()
-            
-            # Cancel any pending tasks
-            for task in pending:
-                task.cancel()
-                
-        except Exception as e:
-            logger.error(f"Error in parallel auction: {e}")
-            for dsp_name in dsp_tracking:
-                if dsp_tracking[dsp_name]["status"] == "pending":
-                    dsp_tracking[dsp_name]["status"] = f"error: {str(e)}"
-        
-        # Log DSP performance
-        for dsp_name, tracking in dsp_tracking.items():
-            duration_ms = (datetime.now() - tracking["start_time"]).total_seconds() * 1000
-            log_rtb_step(logger, f"DSP {dsp_name} Response", {
-                "status": tracking["status"],
-                "duration_ms": f"{duration_ms:.2f}"
-            })
-        
-        # Evaluate bids and create auction result
-        winning_bid, auction_price = self.auction_engine._evaluate_bids(bid_responses, bid_request)
-        
-        auction_result = AuctionResult(
-            auction_id=generate_id(),
-            request_id=bid_request.id,
-            winning_bid=winning_bid,
-            all_bids=bid_responses,
-            auction_price=auction_price,
-            timestamp=datetime.now()
-        )
-        
-        # Store auction result
-        auction_history[auction_result.auction_id] = auction_result
-        
-        auction_duration = (datetime.now() - auction_start).total_seconds() * 1000
-        
-        log_rtb_step(logger, "Parallel Auction Completed", {
-            "auction_id": auction_result.auction_id,
-            "duration_ms": f"{auction_duration:.2f}",
-            "total_bids": len(bid_responses),
-            "winning_price": auction_price,
-            "winning_campaign": winning_bid.campaign_id if winning_bid else None,
-            "dsp_performance": {name: tracking["status"] for name, tracking in dsp_tracking.items()}
-        })
-        
-        return auction_result
-    
-    async def _enhanced_dsp_bid_request(self, dsp_client: APIClient, bid_request: BidRequest, 
-                                      dsp_name: str, user_profile: Optional[UserProfile]) -> Optional[BidResponse]:
-        """Enhanced DSP bid request with user profile context."""
-        try:
-            # Add user profile context to bid request if available
-            enhanced_request_data = bid_request.model_dump()
-            if user_profile:
-                enhanced_request_data["user_profile"] = user_profile.model_dump()
-            
-            response_data = await dsp_client.post("/bid", json_data=enhanced_request_data)
-            bid_response = BidResponse.model_validate(response_data)
-            
-            log_rtb_step(logger, f"Enhanced DSP Bid Received", {
-                "dsp": dsp_name,
-                "request_id": bid_request.id,
-                "price": bid_response.price,
-                "campaign_id": bid_response.campaign_id,
-                "user_profile_provided": user_profile is not None
-            })
-            
-            return bid_response
-            
-        except Exception as e:
-            logger.warning(f"Enhanced bid request failed for {dsp_name}: {e}")
-            return None
-    
     async def _process_winning_ad(self, auction_result: AuctionResult, user_visit_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process winning ad and simulate display confirmation."""
+        """Process winning ad and simulate display."""
         if not auction_result.winning_bid:
-            log_rtb_step(logger, "No Winning Ad - Display Fallback", {
+            log_rtb_step(logger, "No Winning Ad", {
                 "auction_id": auction_result.auction_id,
-                "fallback_type": "house_ad"
+                "total_bids": len(auction_result.all_bids)
             })
             
             return {
                 "impression_confirmed": False,
-                "display_type": "fallback",
-                "fallback_reason": "no_winning_bid",
-                "impression_id": None
+                "reason": "no_winning_bid",
+                "auction_id": auction_result.auction_id
             }
         
-        # Generate impression ID and simulate ad display
+        # Simulate ad display process
         impression_id = generate_id()
+        display_timestamp = datetime.now()
         
-        # Simulate display confirmation with SSP
-        try:
-            impression_data = {
-                "impression_id": impression_id,
-                "auction_id": auction_result.auction_id,
-                "campaign_id": auction_result.winning_bid.campaign_id,
-                "user_id": user_visit_data["user_id"],
-                "price": auction_result.auction_price,
-                "creative": auction_result.winning_bid.creative,
-                "timestamp": datetime.now().isoformat()
+        # Calculate revenue split
+        advertiser_payment = auction_result.auction_price
+        platform_fee = advertiser_payment * self.auction_engine.platform_fee_rate
+        publisher_revenue = advertiser_payment - platform_fee
+        
+        display_result = {
+            "impression_confirmed": True,
+            "impression_id": impression_id,
+            "campaign_id": auction_result.winning_bid.campaign_id,
+            "creative": auction_result.winning_bid.creative,
+            "final_price": auction_result.auction_price,
+            "display_timestamp": display_timestamp,
+            "revenue_split": {
+                "advertiser_payment": advertiser_payment,
+                "publisher_revenue": publisher_revenue,
+                "platform_fee": platform_fee
             }
-            
-            # Send impression confirmation to SSP
-            await self.ssp_client.post("/impression", json_data=impression_data)
-            
-            log_rtb_step(logger, "Ad Display Confirmed", {
-                "impression_id": impression_id,
-                "campaign_id": auction_result.winning_bid.campaign_id,
-                "price": auction_result.auction_price,
-                "creative_title": auction_result.winning_bid.creative.get("title", "Unknown"),
-                "user_id": user_visit_data["user_id"]
-            })
-            
-            # Record transaction
-            self.auction_engine.record_transaction(auction_result, impression_data)
-            
-            return {
-                "impression_confirmed": True,
-                "impression_id": impression_id,
-                "display_type": "paid_ad",
-                "campaign_id": auction_result.winning_bid.campaign_id,
-                "price": auction_result.auction_price,
-                "creative": auction_result.winning_bid.creative
-            }
-            
-        except Exception as e:
-            log_rtb_step(logger, "Display Confirmation Failed - Continue Flow", {
-                "impression_id": impression_id,
-                "error": str(e),
-                "fallback_action": "record_locally"
-            })
-            
-            # Continue flow even if SSP confirmation fails
-            return {
-                "impression_confirmed": False,
-                "impression_id": impression_id,
-                "display_type": "paid_ad",
-                "campaign_id": auction_result.winning_bid.campaign_id,
-                "price": auction_result.auction_price,
-                "creative": auction_result.winning_bid.creative,
-                "error": str(e)
-            }
+        }
+        
+        # Record transaction
+        impression_data = {
+            "impression_id": impression_id,
+            "user_id": user_visit_data["user_id"],
+            "display_timestamp": display_timestamp
+        }
+        
+        self.auction_engine.record_transaction(auction_result, impression_data)
+        
+        log_rtb_step(logger, "Ad Display Confirmed", {
+            "impression_id": impression_id,
+            "campaign_id": auction_result.winning_bid.campaign_id,
+            "final_price": auction_result.auction_price,
+            "publisher_revenue": publisher_revenue,
+            "platform_fee": platform_fee
+        })
+        
+        return display_result
     
     async def _execute_feedback_loop(self, auction_result: AuctionResult, display_result: Dict[str, Any], 
                                    user_visit_data: Dict[str, Any], user_profile: Optional[UserProfile]) -> Dict[str, Any]:
         """Execute data feedback loop to update all platforms."""
-        feedback_results = {
-            "dmp_update": {"status": "pending"},
-            "dsp_update": {"status": "pending"},
-            "ssp_update": {"status": "pending"},
-            "stats_update": {"status": "pending"}
-        }
+        feedback_results = {}
         
-        # Update DMP with user behavior data
-        try:
-            behavior_event = {
-                "user_id": user_visit_data["user_id"],
-                "event_type": "ad_impression" if display_result.get("impression_confirmed") else "ad_request",
-                "event_data": {
-                    "campaign_id": auction_result.winning_bid.campaign_id if auction_result.winning_bid else None,
-                    "price": auction_result.auction_price,
-                    "device_type": user_visit_data["device_type"],
-                    "location": user_visit_data["location"],
-                    "timestamp": datetime.now().isoformat()
-                }
-            }
-            
-            await self.dmp_client.post(f"/user/{user_visit_data['user_id']}/events", json_data=behavior_event)
-            feedback_results["dmp_update"] = {"status": "success", "event_type": behavior_event["event_type"]}
-            
-            log_rtb_step(logger, "DMP Feedback Updated", {
-                "user_id": user_visit_data["user_id"],
-                "event_type": behavior_event["event_type"],
-                "campaign_id": behavior_event["event_data"]["campaign_id"]
-            })
-            
-        except Exception as e:
-            feedback_results["dmp_update"] = {"status": "failed", "error": str(e)}
-            log_rtb_step(logger, "DMP Feedback Failed - Continue Flow", {
-                "user_id": user_visit_data["user_id"],
-                "error": str(e)
-            })
-        
-        # Update DSP with campaign performance data
-        if auction_result.winning_bid:
+        # Update DMP with user behavior
+        if display_result.get("impression_confirmed"):
             try:
-                performance_data = {
-                    "campaign_id": auction_result.winning_bid.campaign_id,
-                    "impression_confirmed": display_result.get("impression_confirmed", False),
-                    "price": auction_result.auction_price,
-                    "user_id": user_visit_data["user_id"],
-                    "timestamp": datetime.now().isoformat()
+                event_data = {
+                    "event_type": "view",
+                    "event_data": {
+                        "campaign_id": auction_result.winning_bid.campaign_id if auction_result.winning_bid else None,
+                        "ad_price": auction_result.auction_price,
+                        "page_url": user_visit_data["page_url"],
+                        "device_type": user_visit_data["device_type"],
+                        "impression_id": display_result.get("impression_id")
+                    }
                 }
                 
-                # Send to winning DSP
-                for dsp_name, dsp_client in dsp_clients.items():
-                    if auction_result.winning_bid.dsp_id.startswith(dsp_name):
-                        await dsp_client.post("/performance", json_data=performance_data)
-                        feedback_results["dsp_update"] = {"status": "success", "dsp": dsp_name}
-                        break
+                await self.dmp_client.post(
+                    f"/user/{user_visit_data['user_id']}/events", 
+                    json_data=event_data
+                )
                 
-                log_rtb_step(logger, "DSP Performance Updated", {
-                    "campaign_id": auction_result.winning_bid.campaign_id,
-                    "impression_confirmed": display_result.get("impression_confirmed"),
-                    "price": auction_result.auction_price
-                })
+                feedback_results["dmp_update"] = {"status": "success"}
                 
             except Exception as e:
-                feedback_results["dsp_update"] = {"status": "failed", "error": str(e)}
-                log_rtb_step(logger, "DSP Performance Update Failed - Continue Flow", {
-                    "campaign_id": auction_result.winning_bid.campaign_id,
-                    "error": str(e)
-                })
+                feedback_results["dmp_update"] = {"status": "failed", "error": str(e)}
         
-        # Update SSP with revenue data
-        try:
-            revenue_data = {
-                "impression_id": display_result.get("impression_id"),
-                "auction_id": auction_result.auction_id,
-                "revenue": auction_result.auction_price * 0.9,  # 90% to publisher
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            await self.ssp_client.post("/revenue", json_data=revenue_data)
-            feedback_results["ssp_update"] = {"status": "success", "revenue": revenue_data["revenue"]}
-            
-            log_rtb_step(logger, "SSP Revenue Updated", {
-                "impression_id": display_result.get("impression_id"),
-                "revenue": revenue_data["revenue"]
-            })
-            
-        except Exception as e:
-            feedback_results["ssp_update"] = {"status": "failed", "error": str(e)}
-            log_rtb_step(logger, "SSP Revenue Update Failed - Continue Flow", {
-                "impression_id": display_result.get("impression_id"),
-                "error": str(e)
-            })
-        
-        # Update local statistics
-        try:
-            self._update_workflow_statistics(
-                generate_id(), 
-                datetime.now(), 
-                display_result.get("impression_confirmed", False)
-            )
-            feedback_results["stats_update"] = {"status": "success"}
-            
-            log_rtb_step(logger, "Local Statistics Updated", {
-                "impression_confirmed": display_result.get("impression_confirmed", False)
-            })
-            
-        except Exception as e:
-            feedback_results["stats_update"] = {"status": "failed", "error": str(e)}
-            log_rtb_step(logger, "Statistics Update Failed - Continue Flow", {
-                "error": str(e)
-            })
+        log_rtb_step(logger, "Data Feedback Loop Completed", {
+            "updates_attempted": len(feedback_results),
+            "successful_updates": len([r for r in feedback_results.values() if r.get("status") == "success"])
+        })
         
         return feedback_results
     
-    async def _update_workflow_statistics(self, workflow_id: str, start_time: datetime, success: bool):
+    def _update_workflow_statistics(self, workflow_id: str, start_time: datetime, success: bool):
         """Update workflow execution statistics."""
         duration_ms = (datetime.now() - start_time).total_seconds() * 1000
         
@@ -996,14 +687,92 @@ class RTBWorkflowOrchestrator:
         
         # Update average duration
         total_workflows = self.workflow_stats["total_workflows"]
-        current_avg = self.workflow_stats["average_duration_ms"]
-        self.workflow_stats["average_duration_ms"] = (
-            (current_avg * (total_workflows - 1) + duration_ms) / total_workflows
+        if total_workflows > 0:
+            current_avg = self.workflow_stats["average_duration_ms"]
+            self.workflow_stats["average_duration_ms"] = (
+                (current_avg * (total_workflows - 1) + duration_ms) / total_workflows
+            )
+    
+    def get_workflow_statistics(self) -> Dict[str, Any]:
+        """Get workflow execution statistics."""
+        success_rate = (
+            self.workflow_stats["successful_workflows"] / self.workflow_stats["total_workflows"]
+            if self.workflow_stats["total_workflows"] > 0 else 0
         )
+        
+        return {
+            **self.workflow_stats,
+            "success_rate": round(success_rate, 4),
+            "failure_rate": round(1 - success_rate, 4)
+        }
 
 
 # Initialize RTB workflow orchestrator
 rtb_orchestrator = RTBWorkflowOrchestrator(auction_engine)
+
+
+@app.post("/rtb", response_model=AuctionResult)
+async def handle_rtb_request(bid_request: BidRequest):
+    """Handle real-time bidding request from SSP."""
+    try:
+        log_rtb_step(logger, "RTB Request Received", {
+            "request_id": bid_request.id,
+            "user_id": bid_request.user_id,
+            "ad_slot": f"{bid_request.ad_slot.width}x{bid_request.ad_slot.height}",
+            "device_type": bid_request.device.type,
+            "geo": f"{bid_request.geo.city}, {bid_request.geo.country}"
+        })
+        
+        # Conduct auction
+        auction_result = await auction_engine.conduct_auction(bid_request)
+        
+        return auction_result
+        
+    except Exception as e:
+        logger.error(f"Error handling RTB request: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/auction/{auction_id}", response_model=AuctionResult)
+async def get_auction_details(auction_id: str):
+    """Get details of a specific auction."""
+    if auction_id not in auction_history:
+        raise HTTPException(status_code=404, detail="Auction not found")
+    
+    return auction_history[auction_id]
+
+
+@app.get("/stats", response_model=Dict[str, Any])
+async def get_platform_stats():
+    """Get Ad Exchange platform statistics."""
+    recent_auctions = list(auction_history.values())[-100:]  # Last 100 auctions
+    
+    if recent_auctions:
+        all_bids = []
+        for auction in recent_auctions:
+            all_bids.extend(auction.all_bids)
+        
+        auction_metrics = calculate_auction_metrics([bid.model_dump() for bid in all_bids])
+    else:
+        auction_metrics = {}
+    
+    stats = {
+        **platform_stats,
+        "recent_auction_metrics": auction_metrics,
+        "success_rate": (
+            platform_stats["successful_auctions"] / platform_stats["total_auctions"]
+            if platform_stats["total_auctions"] > 0 else 0
+        ),
+        "total_transactions": len(transaction_records)
+    }
+    
+    return stats
+
+
+@app.get("/transactions", response_model=List[Dict[str, Any]])
+async def get_transactions(limit: int = 100):
+    """Get recent transaction records."""
+    return transaction_records[-limit:]
 
 
 @app.post("/demo/rtb-flow", response_model=Dict[str, Any])
@@ -1067,300 +836,6 @@ async def demo_rtb_flow(user_context: Optional[Dict[str, Any]] = None):
         return error_response
 
 
-@app.post("/demo/rtb-flow-simple")
-async def demo_rtb_flow_simple():
-    """
-    简化版RTB演示接口
-    
-    快速触发RTB流程演示，返回简化的响应数据。
-    """
-    try:
-        log_rtb_step(logger, "Simple RTB Demo Started", {
-            "endpoint": "/demo/rtb-flow-simple"
-        })
-        
-        # Use default user context for simple demo
-        default_context = {
-            "user_id": f"demo-user-{generate_id()[:8]}",
-            "device_type": "desktop",
-            "location": {"country": "US", "city": "San Francisco", "region": "CA"}
-        }
-        
-        workflow_result = await rtb_orchestrator.execute_complete_rtb_workflow(default_context)
-        
-        # Return simplified response
-        simple_response = {
-            "status": workflow_result.get("status"),
-            "duration_ms": workflow_result.get("duration_ms"),
-            "winning_campaign": None,
-            "final_price": 0.0,
-            "impression_confirmed": False
-        }
-        
-        # Extract key information
-        if workflow_result.get("status") == "success":
-            steps = workflow_result.get("steps", {})
-            auction_result = steps.get("auction_result", {})
-            display_result = steps.get("display_result", {})
-            
-            if auction_result.get("winning_bid"):
-                simple_response["winning_campaign"] = auction_result["winning_bid"]["campaign_id"]
-                simple_response["final_price"] = auction_result.get("auction_price", 0.0)
-            
-            simple_response["impression_confirmed"] = display_result.get("impression_confirmed", False)
-        
-        log_rtb_step(logger, "Simple RTB Demo Completed", simple_response)
-        
-        return simple_response
-        
-    except Exception as e:
-        error_response = {
-            "status": "failed",
-            "error": str(e),
-            "duration_ms": 0,
-            "winning_campaign": None,
-            "final_price": 0.0,
-            "impression_confirmed": False
-        }
-        
-        log_rtb_step(logger, "Simple RTB Demo Failed", {
-            "error": str(e)
-        })
-        
-        return error_response
-
-
-@app.get("/demo/workflow-stats")
-async def get_workflow_stats():
-    """
-    获取RTB工作流程统计信息
-    
-    返回演示工作流程的执行统计数据。
-    """
-    stats = {
-        "workflow_statistics": rtb_orchestrator.workflow_stats,
-        "platform_statistics": platform_stats,
-        "recent_auctions": len(auction_history),
-        "total_transactions": len(transaction_records),
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    log_rtb_step(logger, "Workflow Stats Retrieved", {
-        "total_workflows": rtb_orchestrator.workflow_stats["total_workflows"],
-        "success_rate": (
-            rtb_orchestrator.workflow_stats["successful_workflows"] / 
-            max(rtb_orchestrator.workflow_stats["total_workflows"], 1)
-        )
-    })
-    
-    return stats
-
-
-@app.post("/demo/reset-stats")
-async def reset_demo_stats():
-    """
-    重置演示统计数据
-    
-    清除所有演示相关的统计数据和历史记录。
-    """
-    # Reset workflow stats
-    rtb_orchestrator.workflow_stats = {
-        "total_workflows": 0,
-        "successful_workflows": 0,
-        "failed_workflows": 0,
-        "average_duration_ms": 0.0
-    }
-    
-    # Reset platform stats
-    platform_stats.update({
-        "total_auctions": 0,
-        "successful_auctions": 0,
-        "total_revenue": 0.0,
-        "average_cpm": 0.0
-    })
-    
-    # Clear histories
-    auction_history.clear()
-    transaction_records.clear()
-    
-    log_rtb_step(logger, "Demo Statistics Reset", {
-        "timestamp": datetime.now().isoformat(),
-        "action": "all_stats_cleared"
-    })
-    
-    return {
-        "status": "success",
-        "message": "All demo statistics have been reset",
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    async def _execute_feedback_loop(self, auction_result: AuctionResult, display_result: Dict[str, Any], 
-                                   user_visit_data: Dict[str, Any], user_profile: Optional[UserProfile]) -> Dict[str, Any]:
-        """Execute data feedback loop to update all platforms."""
-        feedback_tasks = []
-        feedback_results = {}
-        
-        # Update DMP with user behavior
-        if display_result.get("impression_confirmed"):
-            feedback_tasks.append(
-                self._update_dmp_user_behavior(user_visit_data, auction_result, display_result)
-            )
-        
-        # Update campaign statistics in Ad Management
-        if auction_result.winning_bid:
-            feedback_tasks.append(
-                self._update_campaign_stats(auction_result.winning_bid.campaign_id, auction_result.auction_price)
-            )
-        
-        # Update SSP revenue tracking
-        if display_result.get("impression_confirmed"):
-            feedback_tasks.append(
-                self._update_ssp_revenue(display_result)
-            )
-        
-        # Execute all feedback tasks
-        try:
-            feedback_responses = await asyncio.gather(*feedback_tasks, return_exceptions=True)
-            
-            for i, response in enumerate(feedback_responses):
-                task_name = ["dmp_update", "campaign_stats", "ssp_revenue"][i] if i < 3 else f"task_{i}"
-                if isinstance(response, Exception):
-                    feedback_results[task_name] = {"status": "failed", "error": str(response)}
-                else:
-                    feedback_results[task_name] = {"status": "success", "data": response}
-                    
-        except Exception as e:
-            logger.error(f"Error in feedback loop execution: {e}")
-            feedback_results["error"] = str(e)
-        
-        log_rtb_step(logger, "Data Feedback Loop Completed", {
-            "tasks_executed": len(feedback_tasks),
-            "successful_updates": len([r for r in feedback_results.values() if r.get("status") == "success"]),
-            "failed_updates": len([r for r in feedback_results.values() if r.get("status") == "failed"])
-        })
-        
-        return feedback_results
-    
-    async def _update_dmp_user_behavior(self, user_visit_data: Dict[str, Any], 
-                                      auction_result: AuctionResult, display_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Update DMP with user behavior data."""
-        try:
-            event_data = {
-                "event_type": "view",
-                "event_data": {
-                    "campaign_id": auction_result.winning_bid.campaign_id if auction_result.winning_bid else None,
-                    "ad_price": auction_result.auction_price,
-                    "page_url": user_visit_data["page_url"],
-                    "device_type": user_visit_data["device_type"],
-                    "impression_id": display_result.get("impression_id")
-                }
-            }
-            
-            response = await self.dmp_client.post(
-                f"/user/{user_visit_data['user_id']}/events", 
-                json_data=event_data
-            )
-            
-            return {"status": "success", "response": response}
-            
-        except Exception as e:
-            logger.warning(f"Failed to update DMP user behavior: {e}")
-            return {"status": "failed", "error": str(e)}
-    
-    async def _update_campaign_stats(self, campaign_id: str, spend_amount: float) -> Dict[str, Any]:
-        """Update campaign statistics in Ad Management platform."""
-        try:
-            # This would typically call the Ad Management service
-            # For now, we'll simulate the update
-            stats_update = {
-                "campaign_id": campaign_id,
-                "impressions": 1,
-                "spend": spend_amount,
-                "timestamp": datetime.now()
-            }
-            
-            # In a real implementation, this would be:
-            # response = await ad_mgmt_client.post(f"/campaigns/{campaign_id}/stats", json_data=stats_update)
-            
-            return {"status": "success", "stats_update": stats_update}
-            
-        except Exception as e:
-            logger.warning(f"Failed to update campaign stats: {e}")
-            return {"status": "failed", "error": str(e)}
-    
-    async def _update_ssp_revenue(self, display_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Update SSP revenue tracking."""
-        try:
-            revenue_data = {
-                "impression_id": display_result["impression_id"],
-                "revenue": display_result["revenue_split"]["publisher_revenue"],
-                "timestamp": display_result["display_timestamp"]
-            }
-            
-            # This would typically call the SSP service
-            # response = await self.ssp_client.post("/revenue/record", json_data=revenue_data)
-            
-            return {"status": "success", "revenue_data": revenue_data}
-            
-        except Exception as e:
-            logger.warning(f"Failed to update SSP revenue: {e}")
-            return {"status": "failed", "error": str(e)}
-    
-    async def _update_workflow_statistics(self, workflow_id: str, start_time: datetime, success: bool):
-        """Update workflow execution statistics."""
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        self.workflow_stats["total_workflows"] += 1
-        if success:
-            self.workflow_stats["successful_workflows"] += 1
-        else:
-            self.workflow_stats["failed_workflows"] += 1
-        
-        # Update average duration
-        total_successful = self.workflow_stats["successful_workflows"]
-        if total_successful > 0:
-            current_avg = self.workflow_stats["average_duration_ms"]
-            self.workflow_stats["average_duration_ms"] = (
-                (current_avg * (total_successful - 1) + duration_ms) / total_successful
-            )
-    
-    def get_workflow_statistics(self) -> Dict[str, Any]:
-        """Get workflow execution statistics."""
-        success_rate = (
-            self.workflow_stats["successful_workflows"] / self.workflow_stats["total_workflows"]
-            if self.workflow_stats["total_workflows"] > 0 else 0
-        )
-        
-        return {
-            **self.workflow_stats,
-            "success_rate": round(success_rate, 4),
-            "failure_rate": round(1 - success_rate, 4)
-        }
-
-
-# Initialize RTB workflow orchestrator
-rtb_orchestrator = RTBWorkflowOrchestrator(auction_engine)
-
-
-@app.post("/demo/rtb-flow")
-async def demo_rtb_flow(user_context: Optional[Dict[str, Any]] = None):
-    """Demonstrate complete RTB workflow with full orchestration."""
-    try:
-        log_rtb_step(logger, "RTB Demo Flow Initiated", {
-            "has_user_context": user_context is not None,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Execute complete RTB workflow
-        workflow_result = await rtb_orchestrator.execute_complete_rtb_workflow(user_context)
-        
-        return workflow_result
-        
-    except Exception as e:
-        logger.error(f"Error in RTB demo flow: {e}")
-        raise HTTPException(status_code=500, detail="Demo flow failed")
-
-
 @app.get("/workflow/stats")
 async def get_workflow_statistics():
     """Get RTB workflow execution statistics."""
@@ -1389,173 +864,33 @@ async def execute_complete_rtb_workflow(user_context: Optional[Dict[str, Any]] =
         raise HTTPException(status_code=500, detail=f"Workflow execution failed: {str(e)}")
 
 
-@app.post("/rtb/batch-workflow")
-async def execute_batch_rtb_workflows(batch_size: int = 5, user_contexts: Optional[List[Dict[str, Any]]] = None):
-    """
-    Execute multiple RTB workflows in parallel for performance testing.
-    Requirements 7.3: Parallel processing and timeout control.
-    """
-    try:
-        log_rtb_step(logger, "Batch RTB Workflow Requested", {
-            "batch_size": batch_size,
-            "has_user_contexts": user_contexts is not None,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Create workflow tasks
-        workflow_tasks = []
-        for i in range(batch_size):
-            user_context = user_contexts[i] if user_contexts and i < len(user_contexts) else None
-            task = asyncio.create_task(
-                rtb_orchestrator.execute_complete_rtb_workflow(user_context)
-            )
-            workflow_tasks.append(task)
-        
-        # Execute all workflows in parallel
-        start_time = datetime.now()
-        workflow_results = await asyncio.gather(*workflow_tasks, return_exceptions=True)
-        total_duration = (datetime.now() - start_time).total_seconds() * 1000
-        
-        # Process results
-        successful_workflows = []
-        failed_workflows = []
-        
-        for i, result in enumerate(workflow_results):
-            if isinstance(result, Exception):
-                failed_workflows.append({
-                    "workflow_index": i,
-                    "error": str(result)
-                })
-            else:
-                successful_workflows.append(result)
-        
-        batch_result = {
-            "batch_id": generate_id(),
-            "batch_size": batch_size,
-            "total_duration_ms": total_duration,
-            "successful_count": len(successful_workflows),
-            "failed_count": len(failed_workflows),
-            "success_rate": len(successful_workflows) / batch_size,
-            "successful_workflows": successful_workflows,
-            "failed_workflows": failed_workflows,
-            "timestamp": datetime.now()
-        }
-        
-        log_rtb_step(logger, "Batch RTB Workflow Completed", {
-            "batch_id": batch_result["batch_id"],
-            "successful_count": batch_result["successful_count"],
-            "failed_count": batch_result["failed_count"],
-            "success_rate": f"{batch_result['success_rate']:.2%}",
-            "total_duration_ms": f"{total_duration:.2f}"
-        })
-        
-        return batch_result
-        
-    except Exception as e:
-        logger.error(f"Error executing batch RTB workflows: {e}")
-        raise HTTPException(status_code=500, detail=f"Batch workflow execution failed: {str(e)}")
-
-
-@app.get("/rtb/workflow-history")
-async def get_workflow_history(limit: int = 50):
-    """Get recent RTB workflow execution history."""
-    try:
-        # Get recent auction history as proxy for workflow history
-        recent_auctions = list(auction_history.values())[-limit:]
-        
-        workflow_history = []
-        for auction in recent_auctions:
-            workflow_entry = {
-                "auction_id": auction.auction_id,
-                "request_id": auction.request_id,
-                "timestamp": auction.timestamp,
-                "had_winner": auction.winning_bid is not None,
-                "winning_price": auction.auction_price,
-                "total_bids": len(auction.all_bids),
-                "winning_campaign": auction.winning_bid.campaign_id if auction.winning_bid else None
-            }
-            workflow_history.append(workflow_entry)
-        
-        return {
-            "total_entries": len(workflow_history),
-            "limit": limit,
-            "workflow_history": workflow_history,
-            "timestamp": datetime.now()
-        }
-        
-    except Exception as e:
-        logger.error(f"Error retrieving workflow history: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve workflow history")
-
-
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
-    """Enhanced health check endpoint."""
+    """Health check endpoint for Ad Exchange service."""
     try:
-        # Check DSP connectivity
-        dsp_health = {}
-        for dsp_name, dsp_client in dsp_clients.items():
-            try:
-                health_result = await dsp_client.health_check()
-                dsp_health[dsp_name] = health_result.get("status", "unknown")
-            except Exception as e:
-                dsp_health[dsp_name] = f"unhealthy: {str(e)}"
+        # Check service health
+        health_details = {
+            "service": "ad-exchange",
+            "exchange_id": auction_engine.exchange_id,
+            "total_auctions": platform_stats["total_auctions"],
+            "successful_auctions": platform_stats["successful_auctions"],
+            "total_transactions": len(transaction_records),
+            "dsp_clients_configured": len(dsp_clients),
+            "workflow_stats": rtb_orchestrator.workflow_stats,
+            "uptime_check": "operational",
+            "timestamp": datetime.now().isoformat()
+        }
         
-        # Check SSP connectivity
-        ssp_healthy = True
-        try:
-            await ssp_client.health_check()
-        except Exception:
-            ssp_healthy = False
+        return create_health_response("healthy", health_details)
         
-        # Check DMP connectivity
-        dmp_healthy = True
-        try:
-            await dmp_client.health_check()
-        except Exception:
-            dmp_healthy = False
-        
-        # Calculate service metrics
-        total_auctions = platform_stats["total_auctions"]
-        successful_auctions = platform_stats["successful_auctions"]
-        success_rate = successful_auctions / total_auctions if total_auctions > 0 else 0
-        
-        # Determine overall health
-        status = "healthy"
-        unhealthy_dsps = [k for k, v in dsp_health.items() if "unhealthy" in v]
-        if unhealthy_dsps or not ssp_healthy or not dmp_healthy:
-            status = "degraded"
-        
-        return HealthCheck(
-            status=status,
-            details={
-                "service": "ad-exchange",
-                "version": "0.1.0",
-                "exchange_id": auction_engine.exchange_id,
-                "total_auctions": total_auctions,
-                "successful_auctions": successful_auctions,
-                "success_rate": round(success_rate, 4),
-                "average_cpm": round(platform_stats["average_cpm"], 4),
-                "total_revenue": round(platform_stats["total_revenue"], 4),
-                "connected_dsps": len(dsp_clients),
-                "dsp_health": dsp_health,
-                "dependencies": {
-                    "ssp": "healthy" if ssp_healthy else "unhealthy",
-                    "dmp": "healthy" if dmp_healthy else "unhealthy"
-                },
-                "unhealthy_dsps": unhealthy_dsps
-            }
-        )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return HealthCheck(
-            status="unhealthy",
-            details={
-                "service": "ad-exchange",
-                "error": str(e),
-                "timestamp": datetime.now()
-            }
-        )
+        error_details = {
+            "service": "ad-exchange",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+        return create_health_response("unhealthy", error_details)
 
 
 if __name__ == "__main__":
