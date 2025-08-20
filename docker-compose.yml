@@ -1,0 +1,175 @@
+# Docker Compose configuration for Ad System Architecture
+version: '3.8'
+
+services:
+  # Ad Management Service
+  ad-management:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8001:8001"
+    environment:
+      - SERVICE_NAME=ad-management
+      - HOST=0.0.0.0
+      - PORT=8001
+      - DATABASE_URL=sqlite+aiosqlite:///./data/ad_system.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: ["python", "-m", "server.ad-management.main"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # DSP Service
+  dsp:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8002:8002"
+    environment:
+      - SERVICE_NAME=dsp
+      - HOST=0.0.0.0
+      - PORT=8002
+      - DATABASE_URL=sqlite+aiosqlite:///./data/ad_system.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: ["python", "-m", "server.dsp.main"]
+    depends_on:
+      - ad-management
+      - dmp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # SSP Service
+  ssp:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8003:8003"
+    environment:
+      - SERVICE_NAME=ssp
+      - HOST=0.0.0.0
+      - PORT=8003
+      - DATABASE_URL=sqlite+aiosqlite:///./data/ad_system.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: ["python", "-m", "server.ssp.main"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Ad Exchange Service
+  ad-exchange:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8004:8004"
+    environment:
+      - SERVICE_NAME=ad-exchange
+      - HOST=0.0.0.0
+      - PORT=8004
+      - DATABASE_URL=sqlite+aiosqlite:///./data/ad_system.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: ["python", "-m", "server.ad-exchange.main"]
+    depends_on:
+      - dsp
+      - ssp
+      - dmp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # DMP Service
+  dmp:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8005:8005"
+    environment:
+      - SERVICE_NAME=dmp
+      - HOST=0.0.0.0
+      - PORT=8005
+      - DATABASE_URL=sqlite+aiosqlite:///./data/ad_system.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: ["python", "-m", "server.dmp.main"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # All services in one container (for simple deployment)
+  ad-system-all:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8001:8001"
+      - "8002:8002"
+      - "8003:8003"
+      - "8004:8004"
+      - "8005:8005"
+    environment:
+      - HOST=0.0.0.0
+      - DATABASE_URL=sqlite+aiosqlite:///./data/ad_system.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: ["python", "scripts/start_services.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    profiles:
+      - all-in-one
+
+volumes:
+  data:
+    driver: local
+  logs:
+    driver: local
+
+networks:
+  default:
+    name: ad-system-network
+    driver: bridge

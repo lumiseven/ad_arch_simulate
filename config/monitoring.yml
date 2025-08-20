@@ -1,0 +1,305 @@
+# 系统监控配置文件
+# 定义监控指标、告警规则和健康检查配置
+
+# 服务监控配置
+services:
+  ad-management:
+    port: 8001
+    health_endpoint: "/health"
+    metrics_endpoint: "/metrics"
+    timeout: 5
+    check_interval: 30
+    
+  dsp:
+    port: 8002
+    health_endpoint: "/health"
+    metrics_endpoint: "/metrics"
+    timeout: 5
+    check_interval: 30
+    
+  ssp:
+    port: 8003
+    health_endpoint: "/health"
+    metrics_endpoint: "/metrics"
+    timeout: 5
+    check_interval: 30
+    
+  ad-exchange:
+    port: 8004
+    health_endpoint: "/health"
+    metrics_endpoint: "/metrics"
+    timeout: 5
+    check_interval: 30
+    
+  dmp:
+    port: 8005
+    health_endpoint: "/health"
+    metrics_endpoint: "/metrics"
+    timeout: 5
+    check_interval: 30
+
+# 健康检查配置
+health_checks:
+  # 响应时间阈值 (毫秒)
+  response_time_thresholds:
+    healthy: 100
+    degraded: 500
+    unhealthy: 1000
+    
+  # 连续失败次数阈值
+  failure_thresholds:
+    warning: 3
+    critical: 5
+    
+  # 检查间隔 (秒)
+  check_intervals:
+    normal: 30
+    degraded: 15
+    critical: 5
+
+# 性能监控指标
+metrics:
+  # RTB 性能指标
+  rtb:
+    # RTB 流程总时间阈值 (毫秒)
+    total_time_thresholds:
+      good: 80
+      acceptable: 100
+      poor: 150
+      
+    # DSP 响应时间阈值 (毫秒)
+    dsp_response_thresholds:
+      good: 30
+      acceptable: 50
+      poor: 80
+      
+    # 竞价成功率阈值
+    bid_success_rate_thresholds:
+      good: 0.8
+      acceptable: 0.6
+      poor: 0.4
+      
+  # 数据库性能指标
+  database:
+    # 查询响应时间阈值 (毫秒)
+    query_time_thresholds:
+      good: 50
+      acceptable: 100
+      poor: 200
+      
+    # 连接池使用率阈值
+    connection_pool_thresholds:
+      good: 0.7
+      acceptable: 0.85
+      critical: 0.95
+      
+  # 系统资源指标
+  system:
+    # CPU 使用率阈值
+    cpu_thresholds:
+      good: 0.6
+      warning: 0.8
+      critical: 0.9
+      
+    # 内存使用率阈值
+    memory_thresholds:
+      good: 0.7
+      warning: 0.85
+      critical: 0.95
+      
+    # 磁盘使用率阈值
+    disk_thresholds:
+      good: 0.7
+      warning: 0.85
+      critical: 0.95
+
+# 告警配置
+alerts:
+  # 告警级别
+  levels:
+    - info
+    - warning
+    - error
+    - critical
+    
+  # 告警规则
+  rules:
+    # 服务不可用告警
+    - name: "service_unavailable"
+      condition: "service_status == 'unhealthy'"
+      level: "critical"
+      message: "Service {service_name} is unavailable"
+      cooldown: 300  # 5分钟冷却期
+      
+    # 响应时间过慢告警
+    - name: "slow_response"
+      condition: "response_time > degraded_threshold"
+      level: "warning"
+      message: "Service {service_name} response time is {response_time}ms"
+      cooldown: 180  # 3分钟冷却期
+      
+    # RTB 流程超时告警
+    - name: "rtb_timeout"
+      condition: "rtb_duration > 100"
+      level: "error"
+      message: "RTB workflow timeout: {rtb_duration}ms"
+      cooldown: 60   # 1分钟冷却期
+      
+    # 数据库连接告警
+    - name: "database_connection"
+      condition: "database_status == 'disconnected'"
+      level: "critical"
+      message: "Database connection lost for service {service_name}"
+      cooldown: 300  # 5分钟冷却期
+      
+    # 高错误率告警
+    - name: "high_error_rate"
+      condition: "error_rate > 0.05"  # 5% 错误率
+      level: "warning"
+      message: "High error rate detected: {error_rate}%"
+      cooldown: 300  # 5分钟冷却期
+
+# 日志聚合配置
+logging:
+  # 日志级别
+  levels:
+    default: "INFO"
+    services:
+      ad-exchange: "DEBUG"  # RTB 流程需要详细日志
+      rtb: "DEBUG"
+      
+  # 日志轮转配置
+  rotation:
+    max_size: "10MB"
+    backup_count: 5
+    
+  # 日志格式
+  formats:
+    console: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    file: "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+    json: '{"timestamp": "%(asctime)s", "service": "%(name)s", "level": "%(levelname)s", "message": "%(message)s"}'
+    
+  # 特殊日志处理
+  special_loggers:
+    rtb:
+      format: "%(asctime)s - RTB - %(levelname)s - %(message)s"
+      file: "logs/rtb.log"
+      
+    database:
+      format: "%(asctime)s - DB - %(levelname)s - %(message)s"
+      file: "logs/database.log"
+      level: "WARNING"  # 只记录警告和错误
+
+# 数据收集配置
+data_collection:
+  # 指标收集间隔 (秒)
+  collection_interval: 10
+  
+  # 数据保留期 (天)
+  retention_days: 30
+  
+  # 聚合统计间隔
+  aggregation_intervals:
+    - "1m"   # 1分钟
+    - "5m"   # 5分钟
+    - "1h"   # 1小时
+    - "1d"   # 1天
+    
+  # 收集的指标类型
+  metrics_types:
+    - "response_time"
+    - "request_count"
+    - "error_count"
+    - "success_rate"
+    - "rtb_duration"
+    - "bid_success_rate"
+    - "database_query_time"
+    - "system_resources"
+
+# 报表配置
+reporting:
+  # 自动报表生成
+  auto_reports:
+    daily:
+      enabled: true
+      time: "09:00"
+      recipients: ["admin@example.com"]
+      
+    weekly:
+      enabled: true
+      day: "monday"
+      time: "09:00"
+      recipients: ["admin@example.com"]
+      
+  # 报表内容
+  report_content:
+    - "system_health_summary"
+    - "performance_metrics"
+    - "error_analysis"
+    - "rtb_statistics"
+    - "top_campaigns"
+    - "resource_usage"
+    
+  # 报表格式
+  formats:
+    - "html"
+    - "json"
+
+# 仪表板配置
+dashboard:
+  # 刷新间隔 (秒)
+  refresh_interval: 30
+  
+  # 显示的图表
+  charts:
+    - name: "服务健康状态"
+      type: "status_grid"
+      data_source: "health_checks"
+      
+    - name: "响应时间趋势"
+      type: "line_chart"
+      data_source: "response_times"
+      time_range: "1h"
+      
+    - name: "RTB 性能指标"
+      type: "gauge_chart"
+      data_source: "rtb_metrics"
+      
+    - name: "错误率统计"
+      type: "bar_chart"
+      data_source: "error_rates"
+      time_range: "24h"
+      
+    - name: "系统资源使用"
+      type: "area_chart"
+      data_source: "system_metrics"
+      time_range: "1h"
+
+# 通知配置
+notifications:
+  # 通知渠道
+  channels:
+    console:
+      enabled: true
+      levels: ["info", "warning", "error", "critical"]
+      
+    file:
+      enabled: true
+      file: "logs/alerts.log"
+      levels: ["warning", "error", "critical"]
+      
+    email:
+      enabled: false
+      smtp_server: "smtp.example.com"
+      smtp_port: 587
+      username: "alerts@example.com"
+      password: "password"
+      recipients: ["admin@example.com"]
+      levels: ["error", "critical"]
+      
+  # 通知模板
+  templates:
+    service_down: "🚨 服务告警: {service_name} 服务不可用"
+    slow_response: "⚠️ 性能告警: {service_name} 响应时间过慢 ({response_time}ms)"
+    rtb_timeout: "❌ RTB 告警: 竞价流程超时 ({duration}ms)"
+    database_error: "💾 数据库告警: {service_name} 数据库连接异常"
