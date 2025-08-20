@@ -20,4 +20,4 @@ __pycache__/
 .kiro
 .pytest_cache
 uv.lock
-ad_system.db*
+ad_system*
