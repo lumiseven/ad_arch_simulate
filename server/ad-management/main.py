@@ -18,6 +18,9 @@ from shared.utils import (
     handle_service_error,
     ServiceError
 )
+from shared.config import get_config
+from shared.database import init_database, check_database_health
+from shared.database_service import get_campaign_service, get_campaign_stats_service
 from shared.models import (
     Campaign, 
     CampaignStats, 
@@ -28,10 +31,15 @@ from shared.models import (
 from pydantic import BaseModel
 
 # Service configuration
+app_config = get_config("ad-management")
 config = ServiceConfig("ad-management")
-logger = setup_logging("ad-management")
+logger = setup_logging("ad-management", app_config.logging.level)
 
-# In-memory storage for campaigns and stats (in production, use a database)
+# Database services
+campaign_service = get_campaign_service()
+campaign_stats_service = get_campaign_stats_service()
+
+# In-memory storage for fallback (when database is unavailable)
 campaigns_db: Dict[str, Campaign] = {}
 campaign_stats_db: Dict[str, CampaignStats] = {}
 
@@ -41,6 +49,17 @@ app = FastAPI(
     description="Service for managing advertising campaigns, creatives, and budgets",
     version="0.1.0"
 )
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup."""
+    try:
+        await init_database()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        logger.info("Service will continue with fallback storage")
 
 
 # Error handling middleware
@@ -173,62 +192,78 @@ def validate_creative_content(creative: Dict[str, Any]) -> bool:
     return True
 
 
-def calculate_campaign_stats(campaign_id: str) -> CampaignStats:
-    """Calculate or retrieve campaign statistics."""
-    if campaign_id in campaign_stats_db:
-        return campaign_stats_db[campaign_id]
-    
-    # Create initial stats if not exists
-    stats = CampaignStats(campaign_id=campaign_id)
-    campaign_stats_db[campaign_id] = stats
-    return stats
+async def initialize_campaign_stats(campaign_id: str) -> CampaignStats:
+    """Initialize campaign statistics."""
+    try:
+        # Check if stats already exist
+        existing_stats = await campaign_stats_service.get_stats(campaign_id)
+        if existing_stats:
+            return existing_stats
+        
+        # Create initial stats
+        stats_update = {
+            "impressions": 0,
+            "clicks": 0,
+            "conversions": 0,
+            "spend": 0.0,
+            "revenue": 0.0,
+            "ctr": 0.0,
+            "cpc": 0.0
+        }
+        
+        await campaign_stats_service.update_stats(campaign_id, stats_update)
+        return await campaign_stats_service.get_stats(campaign_id)
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize stats for campaign {campaign_id}: {e}")
+        # Fallback to in-memory stats
+        stats = CampaignStats(campaign_id=campaign_id)
+        campaign_stats_db[campaign_id] = stats
+        return stats
 
 
-def update_campaign_spend(campaign_id: str, amount: float) -> bool:
+async def update_campaign_spend(campaign_id: str, amount: float) -> bool:
     """Update campaign spend amount."""
-    if campaign_id not in campaigns_db:
+    try:
+        # Update spend using database service
+        success = await campaign_service.update_spend(campaign_id, amount)
+        
+        if success:
+            # Update stats
+            campaign = await campaign_service.get_campaign(campaign_id)
+            if campaign:
+                stats_update = {"spend": campaign.spent}
+                await campaign_stats_service.update_stats(campaign_id, stats_update)
+                logger.info(f"Updated spend for campaign {campaign_id}: {campaign.spent}/{campaign.budget}")
+        
+        return success
+        
+    except Exception as e:
+        logger.error(f"Failed to update spend for campaign {campaign_id}: {e}")
         return False
-    
-    campaign = campaigns_db[campaign_id]
-    new_spent = campaign.spent + amount
-    
-    # Check budget constraints
-    if new_spent > campaign.budget:
-        logger.warning(f"Spend amount {new_spent} exceeds budget {campaign.budget} for campaign {campaign_id}")
-        return False
-    
-    campaign.spent = new_spent
-    campaign.updated_at = datetime.now()
-    
-    # Update stats
-    stats = calculate_campaign_stats(campaign_id)
-    stats.spend = new_spent
-    stats.updated_at = datetime.now()
-    
-    logger.info(f"Updated spend for campaign {campaign_id}: {new_spent}/{campaign.budget}")
-    return True
 
 
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
     """Enhanced health check endpoint."""
     try:
-        # Check database connectivity (simulated)
-        db_healthy = True
+        # Check database connectivity
+        db_healthy = await check_database_health()
         
         # Check service dependencies
         dependencies = {}
         
-        # Calculate service metrics
-        total_campaigns = len(campaigns_db)
-        active_campaigns = len([c for c in campaigns_db.values() if c.status == CampaignStatus.ACTIVE])
-        total_budget = sum(c.budget for c in campaigns_db.values())
-        total_spent = sum(c.spent for c in campaigns_db.values())
+        # Calculate service metrics using database service
+        campaigns = await campaign_service.list_campaigns(limit=10000)  # Get all for counting
+        total_campaigns = len(campaigns)
+        active_campaigns = len([c for c in campaigns if c.status == CampaignStatus.ACTIVE])
+        total_budget = sum(c.budget for c in campaigns)
+        total_spent = sum(c.spent for c in campaigns)
         
         # Determine overall health status
         status = "healthy"
         if not db_healthy:
-            status = "unhealthy"
+            status = "degraded"  # Service can still work with fallback
         elif total_campaigns > 1000:  # Example threshold
             status = "degraded"
         
@@ -244,7 +279,8 @@ async def health_check():
                 "total_budget": total_budget,
                 "total_spent": total_spent,
                 "memory_usage": "unknown",  # Would use psutil in production
-                "dependencies": dependencies
+                "dependencies": dependencies,
+                "fallback_mode": not db_healthy
             }
         )
     except Exception as e:
@@ -289,14 +325,14 @@ async def create_campaign(campaign_data: CampaignCreate):
             status=CampaignStatus.DRAFT
         )
         
-        # Store campaign
-        campaigns_db[campaign_id] = campaign
+        # Store campaign using database service
+        created_campaign = await campaign_service.create_campaign(campaign)
         
         # Initialize stats
-        calculate_campaign_stats(campaign_id)
+        await initialize_campaign_stats(campaign_id)
         
         logger.info(f"Created campaign {campaign_id}: {campaign.name}")
-        return campaign
+        return created_campaign
         
     except Exception as e:
         logger.error(f"Error creating campaign: {e}")
@@ -306,10 +342,10 @@ async def create_campaign(campaign_data: CampaignCreate):
 @app.get("/campaigns/{campaign_id}", response_model=Campaign)
 async def get_campaign(campaign_id: str):
     """Get campaign details by ID."""
-    if campaign_id not in campaigns_db:
+    campaign = await campaign_service.get_campaign(campaign_id)
+    if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
-    campaign = campaigns_db[campaign_id]
     logger.info(f"Retrieved campaign {campaign_id}")
     return campaign
 
@@ -317,15 +353,17 @@ async def get_campaign(campaign_id: str):
 @app.put("/campaigns/{campaign_id}", response_model=Campaign)
 async def update_campaign(campaign_id: str, update_data: CampaignUpdate):
     """Update campaign details."""
-    if campaign_id not in campaigns_db:
+    # Get existing campaign
+    campaign = await campaign_service.get_campaign(campaign_id)
+    if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
-    campaign = campaigns_db[campaign_id]
-    
     try:
-        # Update fields if provided
+        # Prepare update data
+        update_dict = {}
+        
         if update_data.name is not None:
-            campaign.name = update_data.name
+            update_dict["name"] = update_data.name
         
         if update_data.budget is not None:
             if update_data.budget < campaign.spent:
@@ -333,7 +371,7 @@ async def update_campaign(campaign_id: str, update_data: CampaignUpdate):
                     status_code=400,
                     detail="Budget cannot be less than already spent amount"
                 )
-            campaign.budget = update_data.budget
+            update_dict["budget"] = update_data.budget
         
         if update_data.targeting is not None:
             if not validate_targeting_criteria(update_data.targeting):
@@ -341,7 +379,7 @@ async def update_campaign(campaign_id: str, update_data: CampaignUpdate):
                     status_code=400,
                     detail="Invalid targeting criteria format"
                 )
-            campaign.targeting = update_data.targeting
+            update_dict["targeting"] = update_data.targeting
         
         if update_data.creative is not None:
             if not validate_creative_content(update_data.creative):
@@ -349,15 +387,18 @@ async def update_campaign(campaign_id: str, update_data: CampaignUpdate):
                     status_code=400,
                     detail="Invalid creative content format"
                 )
-            campaign.creative = update_data.creative
+            update_dict["creative"] = update_data.creative
         
         if update_data.status is not None:
-            campaign.status = update_data.status
+            update_dict["status"] = update_data.status.value
         
-        campaign.updated_at = datetime.now()
+        # Update campaign using database service
+        updated_campaign = await campaign_service.update_campaign(campaign_id, update_dict)
+        if updated_campaign is None:
+            raise HTTPException(status_code=404, detail="Campaign not found")
         
         logger.info(f"Updated campaign {campaign_id}")
-        return campaign
+        return updated_campaign
         
     except HTTPException:
         raise
@@ -369,13 +410,9 @@ async def update_campaign(campaign_id: str, update_data: CampaignUpdate):
 @app.delete("/campaigns/{campaign_id}")
 async def delete_campaign(campaign_id: str):
     """Delete a campaign."""
-    if campaign_id not in campaigns_db:
+    success = await campaign_service.delete_campaign(campaign_id)
+    if not success:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    
-    # Remove campaign and its stats
-    del campaigns_db[campaign_id]
-    if campaign_id in campaign_stats_db:
-        del campaign_stats_db[campaign_id]
     
     logger.info(f"Deleted campaign {campaign_id}")
     return {"message": "Campaign deleted successfully"}
@@ -389,7 +426,8 @@ async def list_campaigns(
     offset: int = 0
 ):
     """List campaigns with optional filtering."""
-    campaigns = list(campaigns_db.values())
+    # Get campaigns from database service
+    campaigns = await campaign_service.list_campaigns(limit=limit * 2, offset=0)  # Get more for filtering
     
     # Apply filters
     if advertiser_id:
@@ -398,7 +436,7 @@ async def list_campaigns(
     if status:
         campaigns = [c for c in campaigns if c.status == status]
     
-    # Apply pagination
+    # Apply pagination after filtering
     campaigns = campaigns[offset:offset + limit]
     
     logger.info(f"Listed {len(campaigns)} campaigns")
@@ -408,10 +446,17 @@ async def list_campaigns(
 @app.get("/campaigns/{campaign_id}/stats", response_model=CampaignStats)
 async def get_campaign_stats(campaign_id: str):
     """Get campaign statistics."""
-    if campaign_id not in campaigns_db:
+    # Check if campaign exists
+    campaign = await campaign_service.get_campaign(campaign_id)
+    if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
-    stats = calculate_campaign_stats(campaign_id)
+    # Get stats
+    stats = await campaign_stats_service.get_stats(campaign_id)
+    if stats is None:
+        # Initialize stats if they don't exist
+        stats = await initialize_campaign_stats(campaign_id)
+    
     logger.info(f"Retrieved stats for campaign {campaign_id}")
     return stats
 
@@ -419,13 +464,15 @@ async def get_campaign_stats(campaign_id: str):
 @app.post("/campaigns/{campaign_id}/spend")
 async def update_campaign_spend_endpoint(campaign_id: str, spend_data: BudgetUpdate):
     """Update campaign spend amount."""
-    if campaign_id not in campaigns_db:
+    # Check if campaign exists
+    campaign = await campaign_service.get_campaign(campaign_id)
+    if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
     if spend_data.amount <= 0:
         raise HTTPException(status_code=400, detail="Spend amount must be positive")
     
-    success = update_campaign_spend(campaign_id, spend_data.amount)
+    success = await update_campaign_spend(campaign_id, spend_data.amount)
     if not success:
         raise HTTPException(
             status_code=400,
@@ -438,10 +485,10 @@ async def update_campaign_spend_endpoint(campaign_id: str, spend_data: BudgetUpd
 @app.get("/campaigns/{campaign_id}/budget-status")
 async def get_budget_status(campaign_id: str):
     """Get campaign budget status and remaining budget."""
-    if campaign_id not in campaigns_db:
+    campaign = await campaign_service.get_campaign(campaign_id)
+    if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
-    campaign = campaigns_db[campaign_id]
     remaining_budget = campaign.budget - campaign.spent
     utilization_rate = campaign.spent / campaign.budget if campaign.budget > 0 else 0
     
@@ -464,10 +511,10 @@ async def get_budget_status(campaign_id: str):
 @app.post("/campaigns/{campaign_id}/validate-targeting")
 async def validate_campaign_targeting(campaign_id: str):
     """Validate campaign targeting criteria."""
-    if campaign_id not in campaigns_db:
+    campaign = await campaign_service.get_campaign(campaign_id)
+    if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
-    campaign = campaigns_db[campaign_id]
     is_valid = validate_targeting_criteria(campaign.targeting)
     
     return {
@@ -480,17 +527,24 @@ async def validate_campaign_targeting(campaign_id: str):
 @app.get("/stats/summary")
 async def get_platform_stats():
     """Get platform-wide statistics summary."""
-    total_campaigns = len(campaigns_db)
-    active_campaigns = len([c for c in campaigns_db.values() if c.status == CampaignStatus.ACTIVE])
-    total_budget = sum(c.budget for c in campaigns_db.values())
-    total_spent = sum(c.spent for c in campaigns_db.values())
+    # Get all campaigns for statistics
+    campaigns = await campaign_service.list_campaigns(limit=10000)  # Get all campaigns
+    
+    total_campaigns = len(campaigns)
+    active_campaigns = len([c for c in campaigns if c.status == CampaignStatus.ACTIVE])
+    paused_campaigns = len([c for c in campaigns if c.status == CampaignStatus.PAUSED])
+    completed_campaigns = len([c for c in campaigns if c.status == CampaignStatus.COMPLETED])
+    draft_campaigns = len([c for c in campaigns if c.status == CampaignStatus.DRAFT])
+    
+    total_budget = sum(c.budget for c in campaigns)
+    total_spent = sum(c.spent for c in campaigns)
     
     return {
         "total_campaigns": total_campaigns,
         "active_campaigns": active_campaigns,
-        "paused_campaigns": len([c for c in campaigns_db.values() if c.status == CampaignStatus.PAUSED]),
-        "completed_campaigns": len([c for c in campaigns_db.values() if c.status == CampaignStatus.COMPLETED]),
-        "draft_campaigns": len([c for c in campaigns_db.values() if c.status == CampaignStatus.DRAFT]),
+        "paused_campaigns": paused_campaigns,
+        "completed_campaigns": completed_campaigns,
+        "draft_campaigns": draft_campaigns,
         "total_budget": total_budget,
         "total_spent": total_spent,
         "remaining_budget": total_budget - total_spent,
@@ -500,4 +554,4 @@ async def get_platform_stats():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=config.host, port=config.port)
+    uvicorn.run(app, host=app_config.service.host, port=app_config.service.port)
