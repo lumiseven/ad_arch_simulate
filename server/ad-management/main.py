@@ -3,7 +3,9 @@ Ad Management Platform main application.
 FastAPI service for managing advertising campaigns.
 """
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import asyncio
@@ -12,7 +14,9 @@ from shared.utils import (
     ServiceConfig, 
     generate_id, 
     create_error_response,
-    serialize_model
+    serialize_model,
+    handle_service_error,
+    ServiceError
 )
 from shared.models import (
     Campaign, 
@@ -37,6 +41,59 @@ app = FastAPI(
     description="Service for managing advertising campaigns, creatives, and budgets",
     version="0.1.0"
 )
+
+
+# Error handling middleware
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError):
+    """Handle ServiceError exceptions."""
+    logger.error(f"Service error in {request.url.path}: {exc.message}")
+    return JSONResponse(
+        status_code=500,
+        content=create_error_response(exc.error_code, exc.message, exc.details)
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Handle request validation errors."""
+    logger.warning(f"Validation error in {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=422,
+        content=create_error_response(
+            "VALIDATION_ERROR",
+            "Request validation failed",
+            {"errors": exc.errors()}
+        )
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions."""
+    logger.warning(f"HTTP exception in {request.url.path}: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=create_error_response(
+            "HTTP_ERROR",
+            exc.detail,
+            {"status_code": exc.status_code}
+        )
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions."""
+    logger.error(f"Unexpected error in {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content=create_error_response(
+            "INTERNAL_ERROR",
+            "An internal server error occurred",
+            {"error": str(exc)}
+        )
+    )
 
 
 class CampaignCreate(BaseModel):
@@ -154,14 +211,52 @@ def update_campaign_spend(campaign_id: str, amount: float) -> bool:
 
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
-    """Health check endpoint."""
-    return HealthCheck(
-        status="healthy",
-        details={
-            "campaigns_count": len(campaigns_db),
-            "active_campaigns": len([c for c in campaigns_db.values() if c.status == CampaignStatus.ACTIVE])
-        }
-    )
+    """Enhanced health check endpoint."""
+    try:
+        # Check database connectivity (simulated)
+        db_healthy = True
+        
+        # Check service dependencies
+        dependencies = {}
+        
+        # Calculate service metrics
+        total_campaigns = len(campaigns_db)
+        active_campaigns = len([c for c in campaigns_db.values() if c.status == CampaignStatus.ACTIVE])
+        total_budget = sum(c.budget for c in campaigns_db.values())
+        total_spent = sum(c.spent for c in campaigns_db.values())
+        
+        # Determine overall health status
+        status = "healthy"
+        if not db_healthy:
+            status = "unhealthy"
+        elif total_campaigns > 1000:  # Example threshold
+            status = "degraded"
+        
+        return HealthCheck(
+            status=status,
+            details={
+                "service": "ad-management",
+                "version": "0.1.0",
+                "uptime": "unknown",  # Would be calculated from start time
+                "database": "healthy" if db_healthy else "unhealthy",
+                "campaigns_count": total_campaigns,
+                "active_campaigns": active_campaigns,
+                "total_budget": total_budget,
+                "total_spent": total_spent,
+                "memory_usage": "unknown",  # Would use psutil in production
+                "dependencies": dependencies
+            }
+        )
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return HealthCheck(
+            status="unhealthy",
+            details={
+                "service": "ad-management",
+                "error": str(e),
+                "timestamp": datetime.now()
+            }
+        )
 
 
 @app.post("/campaigns", response_model=Campaign)

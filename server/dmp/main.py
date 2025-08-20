@@ -9,10 +9,12 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 import uvicorn
 
+from shared.utils import create_error_response, handle_service_error, ServiceError
 from shared.models import (
     UserProfile, 
     UserEvent, 
@@ -34,6 +36,31 @@ app = FastAPI(
     version="0.1.0"
 )
 
+
+# Error handling middleware
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError):
+    """Handle ServiceError exceptions."""
+    logger.error(f"Service error in {request.url.path}: {exc.message}")
+    return JSONResponse(
+        status_code=500,
+        content=create_error_response(exc.error_code, exc.message, exc.details)
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Handle request validation errors."""
+    logger.warning(f"Validation error in {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=422,
+        content=create_error_response(
+            "VALIDATION_ERROR",
+            "Request validation failed",
+            {"errors": exc.errors()}
+        )
+    )
+
 # In-memory storage for demonstration (in production, use a proper database)
 user_profiles: Dict[str, UserProfile] = {}
 user_events: Dict[str, List[UserEvent]] = {}
@@ -47,15 +74,47 @@ user_segments: Dict[str, List[str]] = {
 
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
-    """Health check endpoint."""
-    return HealthCheck(
-        status="healthy",
-        details={
-            "total_profiles": len(user_profiles),
-            "total_events": sum(len(events) for events in user_events.values()),
-            "segments": {name: len(users) for name, users in user_segments.items()}
-        }
-    )
+    """Enhanced health check endpoint."""
+    try:
+        # Calculate service metrics
+        total_profiles = len(user_profiles)
+        total_events = sum(len(events) for events in user_events.values())
+        segment_counts = {name: len(users) for name, users in user_segments.items()}
+        
+        # Check data consistency
+        data_consistent = True
+        # Add data consistency checks here if needed
+        
+        # Determine overall health
+        status = "healthy"
+        if not data_consistent:
+            status = "degraded"
+        elif total_profiles > 100000:  # Example threshold
+            status = "degraded"
+        
+        return HealthCheck(
+            status=status,
+            details={
+                "service": "dmp",
+                "version": "0.1.0",
+                "total_profiles": total_profiles,
+                "total_events": total_events,
+                "segments": segment_counts,
+                "data_consistent": data_consistent,
+                "memory_usage": "unknown",  # Would use psutil in production
+                "storage_health": "healthy"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return HealthCheck(
+            status="unhealthy",
+            details={
+                "service": "dmp",
+                "error": str(e),
+                "timestamp": datetime.now()
+            }
+        )
 
 @app.get("/user/{user_id}/profile", response_model=UserProfile)
 async def get_user_profile(user_id: str):

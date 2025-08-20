@@ -1,4 +1,4 @@
 """
-Ad Exchange Service.
-Connects DSPs and SSPs to facilitate real-time bidding auctions.
+Ad Exchange service module.
+Real-time bidding coordination platform.
 """

@@ -6,11 +6,13 @@ FastAPI service for real-time bidding on behalf of advertisers.
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from shared.utils import (
     setup_logging, ServiceConfig, APIClient, generate_id, 
-    create_error_response, create_health_response, log_rtb_step
+    create_error_response, create_health_response, log_rtb_step,
+    handle_service_error, ServiceError, with_error_handling
 )
 from shared.models import (
     HealthCheck, BidRequest, BidResponse, Campaign, UserProfile,
@@ -27,6 +29,45 @@ app = FastAPI(
     description="Service for real-time bidding on behalf of advertisers",
     version="0.1.0"
 )
+
+
+# Error handling middleware
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError):
+    """Handle ServiceError exceptions."""
+    logger.error(f"Service error in {request.url.path}: {exc.message}")
+    return JSONResponse(
+        status_code=500,
+        content=create_error_response(exc.error_code, exc.message, exc.details)
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Handle request validation errors."""
+    logger.warning(f"Validation error in {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=422,
+        content=create_error_response(
+            "VALIDATION_ERROR",
+            "Request validation failed",
+            {"errors": exc.errors()}
+        )
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions."""
+    logger.error(f"Unexpected error in {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content=create_error_response(
+            "INTERNAL_ERROR",
+            "An internal server error occurred",
+            {"error": str(exc)}
+        )
+    )
 
 # In-memory storage for demonstration
 campaigns_db: Dict[str, Campaign] = {}
@@ -364,14 +405,61 @@ async def remove_campaign(campaign_id: str):
 
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
-    """Health check endpoint."""
-    details = {
-        "active_campaigns": len([c for c in campaigns_db.values() if c.status.value == "active"]),
-        "total_bid_requests": len(bid_history),
-        "dsp_id": bidding_engine.dsp_id
-    }
-    
-    return HealthCheck(status="healthy", details=details)
+    """Enhanced health check endpoint."""
+    try:
+        # Check service dependencies
+        dependencies = {}
+        
+        # Test DMP connectivity
+        try:
+            await dmp_client.health_check()
+            dependencies["dmp"] = "healthy"
+        except Exception as e:
+            dependencies["dmp"] = f"unhealthy: {str(e)}"
+        
+        # Test Ad Management connectivity
+        try:
+            await ad_mgmt_client.health_check()
+            dependencies["ad-management"] = "healthy"
+        except Exception as e:
+            dependencies["ad-management"] = f"unhealthy: {str(e)}"
+        
+        # Calculate service metrics
+        active_campaigns = len([c for c in campaigns_db.values() if c.status.value == "active"])
+        total_requests = len(bid_history)
+        total_bids = len([h for h in bid_history if "bid_response" in h])
+        bid_rate = total_bids / total_requests if total_requests > 0 else 0
+        
+        # Determine overall health
+        status = "healthy"
+        unhealthy_deps = [k for k, v in dependencies.items() if "unhealthy" in v]
+        if unhealthy_deps:
+            status = "degraded"
+        
+        return HealthCheck(
+            status=status,
+            details={
+                "service": "dsp",
+                "version": "0.1.0",
+                "dsp_id": bidding_engine.dsp_id,
+                "active_campaigns": active_campaigns,
+                "total_bid_requests": total_requests,
+                "total_bids_submitted": total_bids,
+                "bid_rate": round(bid_rate, 4),
+                "dependencies": dependencies,
+                "unhealthy_dependencies": unhealthy_deps
+            }
+        )
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return HealthCheck(
+            status="unhealthy",
+            details={
+                "service": "dsp",
+                "error": str(e),
+                "timestamp": datetime.now()
+            }
+        )
 
 
 async def initialize_sample_campaigns():

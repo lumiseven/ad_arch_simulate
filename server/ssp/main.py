@@ -8,9 +8,14 @@ import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
-from shared.utils import setup_logging, ServiceConfig
+from shared.utils import (
+    setup_logging, ServiceConfig, create_error_response, 
+    handle_service_error, ServiceError
+)
 from shared.models import (
     HealthCheck, BidRequest, BidResponse, Impression, ErrorResponse,
     AdSlot, Device, Geo, AuctionResult
@@ -145,16 +150,96 @@ app = FastAPI(
 )
 
 
+# Error handling middleware
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError):
+    """Handle ServiceError exceptions."""
+    logger.error(f"Service error in {request.url.path}: {exc.message}")
+    return JSONResponse(
+        status_code=500,
+        content=create_error_response(exc.error_code, exc.message, exc.details)
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Handle request validation errors."""
+    logger.warning(f"Validation error in {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=422,
+        content=create_error_response(
+            "VALIDATION_ERROR",
+            "Request validation failed",
+            {"errors": exc.errors()}
+        )
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions."""
+    logger.error(f"Unexpected error in {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content=create_error_response(
+            "INTERNAL_ERROR",
+            "An internal server error occurred",
+            {"error": str(exc)}
+        )
+    )
+
+
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
-    """Health check endpoint."""
-    return HealthCheck(
-        status="healthy",
-        details={
-            "inventory_slots": len(ad_inventory),
-            "total_impressions": len(impressions_data)
-        }
-    )
+    """Enhanced health check endpoint."""
+    try:
+        # Check Ad Exchange connectivity
+        ad_exchange_healthy = True
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get("http://localhost:8004/health")
+                ad_exchange_healthy = response.status_code == 200
+        except Exception:
+            ad_exchange_healthy = False
+        
+        # Calculate service metrics
+        total_slots = len(ad_inventory)
+        available_slots = sum(1 for inv in ad_inventory.values() if inv.available)
+        total_impressions = len(impressions_data)
+        total_revenue = sum(inv.total_revenue for inv in ad_inventory.values())
+        
+        # Determine overall health
+        status = "healthy"
+        if not ad_exchange_healthy:
+            status = "degraded"
+        elif total_slots == 0:
+            status = "unhealthy"
+        
+        return HealthCheck(
+            status=status,
+            details={
+                "service": "ssp",
+                "version": "0.1.0",
+                "inventory_slots": total_slots,
+                "available_slots": available_slots,
+                "total_impressions": total_impressions,
+                "total_revenue": round(total_revenue, 2),
+                "fill_rate": round(available_slots / total_slots if total_slots > 0 else 0, 4),
+                "dependencies": {
+                    "ad-exchange": "healthy" if ad_exchange_healthy else "unhealthy"
+                }
+            }
+        )
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return HealthCheck(
+            status="unhealthy",
+            details={
+                "service": "ssp",
+                "error": str(e),
+                "timestamp": datetime.now()
+            }
+        )
 
 
 @app.post("/ad-request", response_model=AdResponse)
